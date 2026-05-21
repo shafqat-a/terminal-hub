@@ -26,12 +26,10 @@ async fn list_sessions_round_trip() {
     // matches our list-sessions output.
     let mut got = None;
     for _ in 0..200 {
-        if let Some(ev) = conn.recv().await {
-            if let Event::CommandOk { body } = ev {
-                if !body.trim().is_empty() {
-                    got = Some(body);
-                    break;
-                }
+        if let Some(Event::CommandOk { body }) = conn.recv().await {
+            if !body.trim().is_empty() {
+                got = Some(body);
+                break;
             }
         }
     }

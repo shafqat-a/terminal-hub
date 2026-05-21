@@ -30,11 +30,14 @@ pub enum Error {
     Config(String),
 }
 
+type RegStates = Arc<Mutex<HashMap<Uuid, (String, PasskeyRegistration, Instant)>>>;
+type AuthStates = Arc<Mutex<HashMap<Uuid, (String, PasskeyAuthentication, Instant)>>>;
+
 #[derive(Clone)]
 pub struct PasskeySvc {
     wan: Arc<Webauthn>,
-    reg_state: Arc<Mutex<HashMap<Uuid, (String, PasskeyRegistration, Instant)>>>,
-    auth_state: Arc<Mutex<HashMap<Uuid, (String, PasskeyAuthentication, Instant)>>>,
+    reg_state: RegStates,
+    auth_state: AuthStates,
 }
 
 impl PasskeySvc {
