@@ -36,6 +36,8 @@ base64 = "0.22"
 rand = "0.8"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 url = "2"
+cookie = "0.18"
+tower-cookies = "0.10"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "test-util"] }

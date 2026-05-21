@@ -2365,6 +2365,7 @@ dependencies = [
  "axum",
  "axum-server",
  "base64 0.22.1",
+ "cookie",
  "directories-next",
  "ed25519-dalek",
  "futures-util",
@@ -2384,6 +2385,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.23.1",
  "tower",
+ "tower-cookies",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2595,6 +2597,23 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "tower-cookies"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fd0118512cf0b3768f7fcccf0bef1ae41d68f2b45edc1e77432b36c97c56c6d"
+dependencies = [
+ "async-trait",
+ "axum-core",
+ "cookie",
+ "futures-util",
+ "http",
+ "parking_lot",
+ "pin-project-lite",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
