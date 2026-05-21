@@ -45,6 +45,7 @@ fn is_public(path: &str) -> bool {
         || path == "/login.js"
         || path == "/enroll.js"
         || path.starts_with("/auth/")
+        || path.starts_with("/peer/")
 }
 
 fn unauth(path: &str) -> Response {

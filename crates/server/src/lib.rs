@@ -46,6 +46,7 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     pub hub: hub::Hub,
     pub auth: auth::routes::AuthState,
+    pub peer_handshake: peer::handshake::PeerHandshakeState,
 }
 
 impl axum::extract::FromRef<AppState> for auth::routes::AuthState {
@@ -72,11 +73,20 @@ pub async fn router_with(cfg: Config, store: db::Store) -> anyhow::Result<Router
         passkey,
         public_url: cfg.public_url.clone(),
     };
+    // Load `authorized_peers` from the config dir (empty if missing). M5 MVP
+    // loads once at boot; no hot reload.
+    let authorized = match paths::Paths::resolve() {
+        Ok(p) => peer::inbound::load(&p.authorized_peers()).unwrap_or_default(),
+        Err(_) => Default::default(),
+    };
+    let peer_handshake = peer::handshake::PeerHandshakeState::new(authorized);
+
     let state = AppState {
         mgr,
         cfg: Arc::new(cfg),
         hub,
         auth: auth_state,
+        peer_handshake,
     };
 
     let auth_routes = Router::new()
@@ -102,6 +112,10 @@ pub async fn router_with(cfg: Config, store: db::Store) -> anyhow::Result<Router
             post(auth::routes::post_passkey_login_finish),
         )
         .route("/auth/logout", post(auth::routes::post_logout));
+
+    let peer_routes = Router::new()
+        .route("/peer/challenge", post(peer::handshake::post_challenge))
+        .route("/peer/auth", post(peer::handshake::post_auth));
 
     Ok(Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -130,6 +144,7 @@ pub async fn router_with(cfg: Config, store: db::Store) -> anyhow::Result<Router
             post(api::peer_create_toggle),
         )
         .merge(auth_routes)
+        .merge(peer_routes)
         .fallback_service(ServeDir::new(static_dir()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

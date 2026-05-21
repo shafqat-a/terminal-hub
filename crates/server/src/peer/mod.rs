@@ -4,6 +4,7 @@
 //! `/peer/auth` handlers and the outbound TLS-pinned `PeerClient`.
 
 pub mod fingerprint;
+pub mod handshake;
 pub mod identity;
 pub mod inbound;
 pub mod outbound;
