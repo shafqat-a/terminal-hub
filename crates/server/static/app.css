@@ -22,6 +22,34 @@ body { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
 
 #terminal { padding: 8px; overflow: hidden; }
 
+/* ---- Federated sidebar groups (M5) ---- */
+#session-list li.group-header {
+  padding: 10px 12px 4px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #888;
+  cursor: default;
+  border-bottom: 0;
+  display: flex; align-items: center; gap: 8px;
+}
+#session-list li.group-header:hover { background: transparent; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.status-dot.ok { background: #5c5; }
+.status-dot.down { background: #555; }
+#session-list li.peer-session {
+  padding-left: 24px;
+  font-style: italic;
+  color: #aaa;
+}
+#session-list li.peer-error {
+  padding: 4px 12px 8px 24px;
+  font-size: 11px;
+  color: #844;
+  cursor: default;
+}
+#session-list li.peer-error:hover { background: transparent; }
+
 /* ---- Share modal (M4) ---- */
 #session-list li button.share-btn { color: #888; }
 #session-list li button.share-btn:hover { color: #6cf; }

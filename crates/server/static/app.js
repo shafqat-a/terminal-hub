@@ -23,33 +23,33 @@ async function loadMe() {
   }
 }
 
-async function refreshSessions() {
-  const r = await fetch("/api/sessions");
-  const { sessions } = await r.json();
-  await loadMe();
-  const ul = document.getElementById("session-list");
-  ul.innerHTML = "";
-  for (const s of sessions) {
-    const li = document.createElement("li");
-    if (s.id === activeId) li.classList.add("active");
-    const label = document.createElement("span");
-    label.textContent = s.display_name;
-    label.style.cursor = "pointer";
+function renderSession(s, ul, peerName) {
+  const li = document.createElement("li");
+  if (peerName === null && s.id === activeId) li.classList.add("active");
+  if (peerName !== null) li.classList.add("peer-session");
+  const label = document.createElement("span");
+  label.textContent = s.display_name;
+  label.style.cursor = peerName === null ? "pointer" : "default";
+  if (peerName === null) {
     label.addEventListener("click", () => attach(s.id));
-    const buttons = [label];
-    if (me && me.role === "primary") {
-      const share = document.createElement("button");
-      share.className = "share-btn";
-      share.textContent = "↪"; // ↪ share arrow
-      share.title = "share session";
-      share.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        openShareModal(s);
-      });
-      buttons.push(share);
-    }
+  } else {
+    label.title = "Attach to peer sessions: M5 follow-up";
+  }
+  const buttons = [label];
+  if (peerName === null && me && me.role === "primary") {
+    const share = document.createElement("button");
+    share.className = "share-btn";
+    share.textContent = "↪";
+    share.title = "share session";
+    share.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openShareModal(s);
+    });
+    buttons.push(share);
+  }
+  if (peerName === null) {
     const kill = document.createElement("button");
-    kill.textContent = "×"; // ×
+    kill.textContent = "×";
     kill.title = "kill session";
     kill.addEventListener("click", async (ev) => {
       ev.stopPropagation();
@@ -59,8 +59,49 @@ async function refreshSessions() {
       refreshSessions();
     });
     buttons.push(kill);
-    li.append(...buttons);
-    ul.append(li);
+  }
+  li.append(...buttons);
+  ul.append(li);
+}
+
+function renderGroupHeader(text, status, ul) {
+  const header = document.createElement("li");
+  header.className = "group-header";
+  const dot = document.createElement("span");
+  dot.className = "status-dot " + (status === "ok" ? "ok" : "down");
+  const name = document.createElement("span");
+  name.className = "group-name";
+  name.textContent = text;
+  header.append(dot, name);
+  ul.append(header);
+}
+
+async function refreshSessions() {
+  const r = await fetch("/api/sessions");
+  const data = await r.json();
+  const localSessions = data.sessions || [];
+  const peers = data.peers || {};
+  await loadMe();
+  const ul = document.getElementById("session-list");
+  ul.innerHTML = "";
+
+  renderGroupHeader(`Local (${localSessions.length})`, "ok", ul);
+  for (const s of localSessions) renderSession(s, ul, null);
+
+  for (const [peerName, info] of Object.entries(peers)) {
+    const status = info.status === "ok" ? "ok" : "down";
+    const countText = status === "ok"
+      ? `${peerName} (${(info.sessions || []).length})`
+      : `${peerName} (unreachable)`;
+    renderGroupHeader(countText, status, ul);
+    if (status === "ok") {
+      for (const s of info.sessions || []) renderSession(s, ul, peerName);
+    } else if (info.error) {
+      const li = document.createElement("li");
+      li.className = "peer-error";
+      li.textContent = info.error;
+      ul.append(li);
+    }
   }
 }
 

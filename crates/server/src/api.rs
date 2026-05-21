@@ -31,11 +31,11 @@ pub async fn list(
     State(s): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let all = s.mgr.list().await.map_err(e500)?;
-    let filtered = match visible_sessions(&s.auth.store, &email, LOCAL)
+    let local_filtered = match visible_sessions(&s.auth.store, &email, LOCAL)
         .await
         .map_err(perm500)?
     {
-        None => all, // primary
+        None => all,
         Some(ids) => {
             let allowed: HashSet<SessionId> = ids.into_iter().collect();
             all.into_iter()
@@ -43,7 +43,38 @@ pub async fn list(
                 .collect()
         }
     };
-    Ok(Json(serde_json::json!({ "sessions": filtered })))
+
+    use crate::peer::federation::FetchResult;
+    let mut peers_json = serde_json::Map::new();
+    for (name, res) in s.federation.fetch_all().await {
+        let entry = match res {
+            FetchResult::Ok(sessions) => {
+                let filtered = match visible_sessions(&s.auth.store, &email, &name)
+                    .await
+                    .map_err(perm500)?
+                {
+                    None => sessions,
+                    Some(ids) => {
+                        let allowed: HashSet<SessionId> = ids.into_iter().collect();
+                        sessions
+                            .into_iter()
+                            .filter(|si| allowed.contains(&si.id))
+                            .collect()
+                    }
+                };
+                serde_json::json!({ "status": "ok", "sessions": filtered })
+            }
+            FetchResult::Unreachable(err) => {
+                serde_json::json!({ "status": "unreachable", "error": err, "sessions": [] })
+            }
+        };
+        peers_json.insert(name, entry);
+    }
+
+    Ok(Json(serde_json::json!({
+        "sessions": local_filtered,
+        "peers": peers_json,
+    })))
 }
 
 pub async fn create(
@@ -366,6 +397,134 @@ fn users500(e: users::Error) -> (StatusCode, String) {
         users::Error::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (code, e.to_string())
+}
+
+/// `GET /api/peers` — list configured outbound peers (primary only). Returns
+/// each peer's friendly_name, url, peer_pubkey, tls_cert_fp.
+pub async fn peers_list(
+    RequirePrimary(_): RequirePrimary,
+    State(s): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let peers = s.federation.peers().await;
+    Ok(Json(serde_json::json!({ "peers": peers })))
+}
+
+#[derive(Deserialize)]
+pub struct AddPeerBody {
+    pub url: String,
+    pub friendly_name: String,
+    pub peer_pubkey: String,
+    pub tls_cert_fp: String,
+}
+
+/// `POST /api/peers` — add a peer (primary only). Persists to peers.toml and
+/// hot-reloads the federation registry. No fingerprint verification on the
+/// server side in MVP — caller is expected to have verified out-of-band per
+/// spec §9.1; the next call to `/api/sessions` will reveal mismatches as
+/// unreachable peers.
+pub async fn peers_add(
+    RequirePrimary(actor): RequirePrimary,
+    State(s): State<AppState>,
+    Json(body): Json<AddPeerBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use crate::peer::outbound::{self, PeerEntry};
+    use crate::paths::Paths;
+
+    let new_entry = PeerEntry {
+        url: body.url.clone(),
+        friendly_name: body.friendly_name.clone(),
+        peer_pubkey: body.peer_pubkey.clone(),
+        tls_cert_fp: body.tls_cert_fp.clone(),
+    };
+
+    let paths = Paths::resolve().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let path = paths.peers_toml();
+    let mut cfg = outbound::load(&path).unwrap_or_default();
+    if cfg.peers.iter().any(|p| p.friendly_name == body.friendly_name) {
+        return Err((StatusCode::CONFLICT, "friendly_name already exists".into()));
+    }
+    cfg.peers.push(new_entry.clone());
+    outbound::save(&path, &cfg)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    s.federation
+        .replace_registry(cfg.peers.clone())
+        .await;
+
+    audit::log(
+        &s.auth.store,
+        &actor,
+        "peer-add",
+        Some(&body.friendly_name),
+        None,
+        Some(serde_json::json!({ "url": body.url })),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({ "peer": new_entry })))
+}
+
+/// `DELETE /api/peers/:friendly_name` — remove a peer (primary only).
+pub async fn peers_remove(
+    RequirePrimary(actor): RequirePrimary,
+    State(s): State<AppState>,
+    Path(friendly_name): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    use crate::paths::Paths;
+    use crate::peer::outbound;
+    let paths = Paths::resolve().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let path = paths.peers_toml();
+    let mut cfg = outbound::load(&path).unwrap_or_default();
+    let before = cfg.peers.len();
+    cfg.peers.retain(|p| p.friendly_name != friendly_name);
+    if cfg.peers.len() == before {
+        return Err((StatusCode::NOT_FOUND, "no such peer".into()));
+    }
+    outbound::save(&path, &cfg)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    s.federation.replace_registry(cfg.peers.clone()).await;
+    audit::log(
+        &s.auth.store,
+        &actor,
+        "peer-remove",
+        Some(&friendly_name),
+        None,
+        None,
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/peer-info` — return this instance's peer identity for the admin
+/// UI to display so the operator can paste it into another instance's
+/// peers.toml. Primary only.
+pub async fn peer_info(
+    RequirePrimary(_): RequirePrimary,
+    State(_s): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use crate::paths::Paths;
+    use crate::peer::{fingerprint::fingerprint_b64, identity::PeerIdentity};
+
+    let paths = Paths::resolve().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    paths.ensure().ok();
+    let id = PeerIdentity::ensure(paths.root())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let peer_fp = fingerprint_b64(&id.pub_bytes());
+
+    let tls_fp = match std::fs::read_to_string(paths.tls_crt()) {
+        Ok(pem_str) => {
+            let der = pem::parse(pem_str.as_bytes())
+                .map(|p| p.into_contents())
+                .unwrap_or_default();
+            fingerprint_b64(&der)
+        }
+        Err(_) => "(tls.crt missing)".into(),
+    };
+
+    Ok(Json(serde_json::json!({
+        "peer_pubkey": id.pub_b64(),
+        "peer_fingerprint": peer_fp,
+        "tls_cert_fingerprint": tls_fp,
+    })))
 }
 
 /// `GET /api/me` — return the calling user's email and role. The frontend uses

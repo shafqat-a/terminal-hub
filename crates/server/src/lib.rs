@@ -47,6 +47,7 @@ pub struct AppState {
     pub hub: hub::Hub,
     pub auth: auth::routes::AuthState,
     pub peer_handshake: peer::handshake::PeerHandshakeState,
+    pub federation: peer::federation::FederationClient,
 }
 
 impl axum::extract::FromRef<AppState> for auth::routes::AuthState {
@@ -73,13 +74,31 @@ pub async fn router_with(cfg: Config, store: db::Store) -> anyhow::Result<Router
         passkey,
         public_url: cfg.public_url.clone(),
     };
-    // Load `authorized_peers` from the config dir (empty if missing). M5 MVP
-    // loads once at boot; no hot reload.
-    let authorized = match paths::Paths::resolve() {
-        Ok(p) => peer::inbound::load(&p.authorized_peers()).unwrap_or_default(),
-        Err(_) => Default::default(),
+    // Load federation state from the config dir at boot. M5 MVP: read-once,
+    // no hot reload. Missing files default to empty (federation off).
+    let (authorized, identity, peers_cfg) = match paths::Paths::resolve() {
+        Ok(p) => {
+            p.ensure().ok();
+            let auth_peers = peer::inbound::load(&p.authorized_peers()).unwrap_or_default();
+            let id = peer::identity::PeerIdentity::ensure(p.root()).ok();
+            let pc = peer::outbound::load(&p.peers_toml()).unwrap_or_default();
+            (auth_peers, id, pc)
+        }
+        Err(_) => (Default::default(), None, Default::default()),
     };
     let peer_handshake = peer::handshake::PeerHandshakeState::new(authorized);
+    // If we couldn't generate or load a peer identity, federation is silently
+    // disabled (empty registry). The peer-info CLI surfaces the issue.
+    let federation = match identity {
+        Some(id) => peer::federation::FederationClient::new(id, peers_cfg),
+        None => {
+            // Generate an ephemeral identity so the type checks; registry is forced empty.
+            let tmp = tempfile::tempdir().expect("tempdir for fallback peer id");
+            let id = peer::identity::PeerIdentity::ensure(tmp.path())
+                .expect("fallback peer id");
+            peer::federation::FederationClient::new(id, peer::outbound::PeersConfig::default())
+        }
+    };
 
     let state = AppState {
         mgr,
@@ -87,6 +106,7 @@ pub async fn router_with(cfg: Config, store: db::Store) -> anyhow::Result<Router
         hub,
         auth: auth_state,
         peer_handshake,
+        federation,
     };
 
     let auth_routes = Router::new()
@@ -143,6 +163,9 @@ pub async fn router_with(cfg: Config, store: db::Store) -> anyhow::Result<Router
             "/api/permissions/peer-create",
             post(api::peer_create_toggle),
         )
+        .route("/api/peers", get(api::peers_list).post(api::peers_add))
+        .route("/api/peers/:friendly_name", axum::routing::delete(api::peers_remove))
+        .route("/api/peer-info", get(api::peer_info))
         .merge(auth_routes)
         .merge(peer_routes)
         .fallback_service(ServeDir::new(static_dir()))
