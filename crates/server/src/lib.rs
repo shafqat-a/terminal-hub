@@ -7,6 +7,7 @@ use tower_http::services::ServeDir;
 
 mod attach;
 pub mod session_id;
+pub mod sessions;
 
 pub struct Config {
     pub tmux_socket: String,
