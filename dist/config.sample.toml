@@ -1,0 +1,15 @@
+# Sample peers.toml. Drop this in the config dir and uncomment to enable
+# federation. Get the field values from `terminal-hub-cli peer-info` on
+# the other instance.
+
+# [[peer]]
+# url           = "https://prod-box.local:5999/"
+# friendly_name = "prod-box"
+# peer_pubkey   = "BASE64_PUBKEY_FROM_OTHER_INSTANCE"
+# tls_cert_fp   = "aaaa:bbbb:cccc"
+
+# [[peer]]
+# url           = "https://homelab.local:5999/"
+# friendly_name = "homelab"
+# peer_pubkey   = "BASE64_PUBKEY_FROM_OTHER_INSTANCE"
+# tls_cert_fp   = "dddd:eeee:ffff"

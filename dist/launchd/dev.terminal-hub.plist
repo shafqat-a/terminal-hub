@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.terminal-hub</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__INSTALL_PREFIX__/bin/terminal-hub</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TERMINAL_HUB_BIND</key><string>127.0.0.1:5999</string>
+    <key>TERMINAL_HUB_PUBLIC_URL</key><string>https://localhost:5999/</string>
+    <key>TERMINAL_HUB_CONFIG_DIR</key>
+    <string>__HOME__/Library/Application Support/terminal-hub</string>
+  </dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/terminal-hub.log</string>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/terminal-hub.log</string>
+</dict>
+</plist>

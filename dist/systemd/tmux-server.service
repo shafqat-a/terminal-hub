@@ -1,0 +1,13 @@
+[Unit]
+Description=tmux server backing terminal-hub
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=__TMUX_BIN__ -L terminal-hub new-session -d -s _boot 'sleep infinity'
+ExecStartPost=__TMUX_BIN__ -L terminal-hub set-option -g remain-on-exit on
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
