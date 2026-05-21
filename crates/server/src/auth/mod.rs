@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod challenge;
+pub mod extract;
 pub mod middleware;
 pub mod passkey;
 pub mod routes;

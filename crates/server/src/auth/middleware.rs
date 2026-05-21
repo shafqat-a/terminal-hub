@@ -13,7 +13,7 @@ use tower_cookies::Cookies;
 pub async fn require_session(
     State(state): State<AppState>,
     cookies: Cookies,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
     let path = req.uri().path().to_string();
@@ -25,7 +25,13 @@ pub async fn require_session(
     };
     let hash = sha256(cookie.value().as_bytes());
     match state.auth.store.lookup_session(&hash).await {
-        Ok(Some(_)) => next.run(req).await,
+        Ok(Some(row)) => {
+            // Stash the authenticated email so downstream extractors
+            // (`AuthUser`, `RequirePrimary`) can read it without re-querying.
+            req.extensions_mut()
+                .insert(crate::auth::extract::AuthUser { email: row.user_email });
+            next.run(req).await
+        }
         _ => unauth(&path),
     }
 }
