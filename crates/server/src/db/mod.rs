@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_initial", include_str!("migrations/0001_initial.sql")),
+    ("0002_permissions", include_str!("migrations/0002_permissions.sql")),
 ];
 
 #[derive(Debug, Clone)]
