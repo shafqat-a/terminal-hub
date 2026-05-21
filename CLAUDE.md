@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-M2 (multi-session local) complete. Cargo workspace with three crates (`tmux-client`, `server`, `cli`). Sidebar UI lists tmux sessions, supports create/kill/switch; multi-tab mirroring + scrollback replay work via per-session broadcast Hub. No auth yet. See `docs/superpowers/specs/2026-05-21-terminal-hub-design.md` for the full design and `docs/superpowers/plans/` for milestone plans.
+M3 (single-user auth + TLS) complete. Cargo workspace: `tmux-client`, `auth-core`,
+`server`, `cli`. Self-signed TLS via `rcgen`. SQLite user store via `rusqlite`
+(bundled). SSH-key challenge / WebAuthn passkey enrollment via the CLI. Cookie-gated
+HTTP + WebSocket sessions. Exactly one primary user; multi-user permissions and
+federation land in M4. See `docs/superpowers/specs/2026-05-21-terminal-hub-design.md`
+for the full design and `docs/superpowers/plans/` for milestone plans.
 
 Build: `cargo build --workspace`
-Test: `cargo test --workspace` (some tests require `tmux` on PATH)
-Run: `cargo run -p terminal-hub-server` (after `tmux -L terminal-hub new-session -d -s _boot`)
+Test: `cargo test --workspace` (tmux + ed25519 tests require `tmux` on PATH)
+Run: see README "Dev setup" — needs bootstrap + tmux + env vars
 
 ## Product intent
 
