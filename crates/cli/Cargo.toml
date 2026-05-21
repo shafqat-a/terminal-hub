@@ -20,3 +20,4 @@ tokio = { workspace = true }
 base64 = "0.22"
 terminal-hub-server = { path = "../server" }
 url = "2"
+pem = "3"

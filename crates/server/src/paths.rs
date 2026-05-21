@@ -44,6 +44,18 @@ impl Paths {
     pub fn config_toml(&self) -> PathBuf {
         self.root.join("config.toml")
     }
+    pub fn peer_id(&self) -> PathBuf {
+        self.root.join("peer_id")
+    }
+    pub fn peer_id_pub(&self) -> PathBuf {
+        self.root.join("peer_id.pub")
+    }
+    pub fn authorized_peers(&self) -> PathBuf {
+        self.root.join("authorized_peers")
+    }
+    pub fn peers_toml(&self) -> PathBuf {
+        self.root.join("peers.toml")
+    }
 
     pub fn root(&self) -> &Path {
         &self.root

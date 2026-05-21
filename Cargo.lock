@@ -2493,6 +2493,7 @@ dependencies = [
  "auth-core",
  "base64 0.22.1",
  "clap",
+ "pem",
  "reqwest",
  "serde",
  "serde_json",

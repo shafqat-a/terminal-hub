@@ -59,6 +59,18 @@ enum Cmd {
         #[arg(long, env = "TERMINAL_HUB_CONFIG_DIR")]
         config_dir: Option<PathBuf>,
     },
+    /// Print this instance's peer identity (pubkey, fingerprint, TLS cert fp,
+    /// and a ready-to-paste `[[peer]]` snippet for another instance's peers.toml).
+    PeerInfo {
+        #[arg(long, env = "TERMINAL_HUB_CONFIG_DIR")]
+        config_dir: Option<PathBuf>,
+        /// Friendly name to embed in the snippet (e.g. the hostname of this box).
+        #[arg(long, default_value = "this-instance")]
+        friendly_name: String,
+        /// URL where this instance is reachable, for the snippet's `url = ` field.
+        #[arg(long, default_value = "https://localhost:5999/")]
+        url: String,
+    },
 }
 
 #[tokio::main]
@@ -82,6 +94,11 @@ async fn main() -> Result<()> {
         } => run_add_user(email, pubkey, config_dir).await,
         Cmd::RemoveUser { email, config_dir } => run_remove_user(email, config_dir).await,
         Cmd::ListUsers { config_dir } => run_list_users(config_dir).await,
+        Cmd::PeerInfo {
+            config_dir,
+            friendly_name,
+            url,
+        } => run_peer_info(config_dir, friendly_name, url),
     }
 }
 
@@ -157,6 +174,48 @@ async fn run_remove_user(email: String, config_dir: Option<PathBuf>) -> Result<(
     let (store, _) = open_store(config_dir)?;
     users::remove(&store, &email).await.map_err(|e| anyhow!("{e}"))?;
     println!("removed: {email}");
+    Ok(())
+}
+
+fn run_peer_info(
+    config_dir: Option<PathBuf>,
+    friendly_name: String,
+    url: String,
+) -> Result<()> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use terminal_hub_server::peer::fingerprint::fingerprint_b64;
+
+    let paths = resolve_paths(config_dir)?;
+    let pub_path = paths.peer_id_pub();
+    let crt_path = paths.tls_crt();
+
+    let pub_b64 = std::fs::read_to_string(&pub_path)
+        .with_context(|| format!("reading {}", pub_path.display()))?
+        .trim()
+        .to_string();
+    let pub_bytes = B64
+        .decode(&pub_b64)
+        .with_context(|| "peer_id.pub is not valid base64")?;
+    let peer_fp = fingerprint_b64(&pub_bytes);
+
+    let cert_pem = std::fs::read_to_string(&crt_path)
+        .with_context(|| format!("reading {}", crt_path.display()))?;
+    let cert_der = pem::parse(cert_pem.as_bytes())
+        .with_context(|| "tls.crt is not valid PEM")?
+        .into_contents();
+    let tls_fp = fingerprint_b64(&cert_der);
+
+    println!("Peer pubkey (base64): {}", pub_b64);
+    println!("Peer fingerprint:     {}", peer_fp);
+    println!("TLS cert fingerprint: {}", tls_fp);
+    println!();
+    println!("Paste this into another instance's peers.toml to add this box as a peer:");
+    println!();
+    println!("[[peer]]");
+    println!("url             = \"{}\"", url);
+    println!("friendly_name   = \"{}\"", friendly_name);
+    println!("peer_pubkey     = \"{}\"", pub_b64);
+    println!("tls_cert_fp     = \"{}\"", tls_fp);
     Ok(())
 }
 
