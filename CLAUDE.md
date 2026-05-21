@@ -4,22 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-M4 (multi-user + per-session ACLs) complete. Cargo workspace: `tmux-client`,
-`auth-core`, `server`, `cli`. Schema migration `0002_permissions.sql` added
-`permissions` and `peer_create_allowed` tables plus `peer_id` / `session_id`
-columns on `audit_log`. Every handler in `api.rs` and `/ws/attach/:id`
-enforces capabilities for secondaries (`ATTACH=1`, `WRITE=2`, `MANAGE=4`);
-primary always bypasses. `terminal-hub-cli add-user / remove-user / list-users`
-manage secondaries on the server host. Grant UI is a modal launched from each
-sidebar row (primary-only, gated by `/api/me`); admin panel at
-`/admin/users.html` lists/adds/removes users. Audit log records login, attach,
-create, kill, rename, grant, revoke, add-user, remove-user, and
-peer-create-toggle (best-effort writes — log failures never fail the request).
+M5 (federation) substantially complete. 4 workspace crates (`tmux-client`,
+`auth-core`, `server`, `cli`). Browser UI with sidebar grouping local +
+federated peer sessions, multi-tab mirroring, scrollback replay. SSH-key
+bootstrap → WebAuthn passkey login, per-session ACLs, primary/secondary
+user roles, audit log, peer-key handshake (`/peer/challenge` + `/peer/auth`),
+`peers.toml` outbound registry, federated `GET /api/sessions` aggregating
+local + peers. `terminal-hub-cli peer-info` prints pubkey + 12-char
+fingerprint + TLS cert fp + ready-to-paste `[[peer]]` snippet.
 
-Federation is not yet implemented — `peer_id` is always `"local"` in M4.
-Next: M5 (cross-peer sessions, peer keypair, authorized_peers,
-lazy on-demand connections). See `docs/superpowers/specs/2026-05-21-terminal-hub-design.md`
-for the full design and `docs/superpowers/plans/` for milestone plans.
+**Documented MVP follow-ups:** TLS cert pinning (cur. `accept_invalid_certs`;
+peer-key auth still cryptographically sound for identity) and federated
+`/ws/attach` proxy (sidebar shows peer sessions read-only with a tooltip
+hint). Both deferred to a security follow-up.
+
+86 cargo tests passing, clippy clean. See `docs/superpowers/specs/2026-05-21-terminal-hub-design.md`
+for full design and `docs/superpowers/plans/` for milestone plans.
 
 Build: `cargo build --workspace`
 Test: `cargo test --workspace` (tmux + ed25519 tests require `tmux` on PATH)
