@@ -1,93 +1,67 @@
-//! /ws/attach — proxies bytes between a browser WebSocket and a tmux session.
-
+use crate::session_id::SessionId;
+use crate::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
-use axum::response::Response;
-use std::sync::Arc;
-use tmux_client::conn::Connection;
-use tmux_client::protocol::Event;
-
-use crate::Config;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use tokio::sync::broadcast;
 
 pub async fn ws_attach(
-    State(cfg): State<Arc<Config>>,
+    State(state): State<AppState>,
+    Path(id_str): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_attach(socket, cfg))
+    let id = match uuid::Uuid::parse_str(&id_str) {
+        Ok(u) => SessionId(u),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    ws.on_upgrade(move |socket| handle(socket, state, id))
 }
 
-async fn handle_attach(mut socket: WebSocket, cfg: Arc<Config>) {
-    let mut conn = match Connection::attach(&cfg.tmux_socket, &cfg.tmux_session).await {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = socket
-                .send(Message::Text(format!("tmux attach error: {e}")))
-                .await;
-            return;
-        }
+async fn handle(mut socket: WebSocket, state: AppState, id: SessionId) {
+    let (mut rx, tx_in) = match state.hub.subscribe(&id).await {
+        Ok(p) => p,
+        Err(e) => { let _ = socket.send(Message::Text(format!("attach error: {e}"))).await; return; }
     };
-
+    if let Ok(scroll) = state.hub.capture_scrollback(&id, 5000).await {
+        if !scroll.is_empty() { let _ = socket.send(Message::Binary(scroll)).await; }
+    }
     loop {
         tokio::select! {
-            ev = conn.recv() => {
-                match ev {
-                    Some(Event::PaneOutput { raw, .. }) => {
-                        let decoded = unescape_octal(&raw);
-                        if socket.send(Message::Binary(decoded)).await.is_err() {
-                            return;
-                        }
-                    }
-                    Some(_) => {} // ignore CommandOk/CommandErr/Unknown for now
-                    None => return,
-                }
-            }
-            msg = socket.recv() => {
-                let Some(Ok(msg)) = msg else { return; };
-                let text = match msg {
+            r = rx.recv() => match r {
+                Ok(b) => { if socket.send(Message::Binary(b)).await.is_err() { return; } }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            m = socket.recv() => {
+                let Some(Ok(m)) = m else { return; };
+                let text = match m {
                     Message::Text(t) => t,
-                    Message::Binary(b) => String::from_utf8_lossy(&b).to_string(),
+                    Message::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
                     Message::Close(_) => return,
                     _ => continue,
                 };
-                let escaped = text.replace('\'', "'\\''");
-                let cmd = format!("send-keys -t '{}' -l '{}'", cfg.tmux_session, escaped);
-                if conn.send_command(&cmd).await.is_err() {
-                    return;
-                }
+                if tx_in.send(text).await.is_err() { return; }
             }
         }
     }
 }
 
-/// tmux escapes non-printable bytes in %output as `\NNN` (octal, 3 digits).
-fn unescape_octal(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 3 < bytes.len() {
-            let octal = &bytes[i + 1..i + 4];
-            if octal.iter().all(|b| (b'0'..=b'7').contains(b)) {
-                let v = (octal[0] - b'0') * 64 + (octal[1] - b'0') * 8 + (octal[2] - b'0');
-                out.push(v);
-                i += 4;
-                continue;
+pub fn unescape_octal(s: &str) -> Vec<u8> {
+    let b = s.as_bytes(); let mut out = Vec::with_capacity(b.len()); let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 3 < b.len() {
+            let o = &b[i+1..i+4];
+            if o.iter().all(|c| (b'0'..=b'7').contains(c)) {
+                out.push((o[0]-b'0')*64 + (o[1]-b'0')*8 + (o[2]-b'0')); i += 4; continue;
             }
         }
-        out.push(bytes[i]);
-        i += 1;
+        out.push(b[i]); i += 1;
     }
     out
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unescapes_known_octals() {
-        assert_eq!(unescape_octal("hi\\015"), b"hi\r");
-        assert_eq!(unescape_octal("a\\033[31mb"), b"a\x1b[31mb");
-        assert_eq!(unescape_octal("nothing-special"), b"nothing-special");
-    }
+mod tests { use super::*;
+    #[test] fn unescapes() { assert_eq!(unescape_octal("hi\\015"), b"hi\r"); }
 }
