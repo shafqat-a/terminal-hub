@@ -4,13 +4,16 @@ A Rust web server that hosts long-lived terminal sessions backed by tmux and exp
 
 ## Status
 
-M4 (multi-user + per-session ACLs) complete. Multi-user instance with a
-primary user and any number of secondaries; per-session capabilities
-(`attach` / `write` / `manage`); CLI and admin panel for user management;
-sidebar share modal for granting per-session access; best-effort audit log
-covering login, attach, create, kill, rename, grant, revoke, add-user,
-remove-user, and peer-create-toggle. Federation (cross-peer sessions)
-remains M5. See `docs/superpowers/plans/` for milestones.
+M5 (federation) substantially complete. Multi-user instance with a primary
+user and any number of secondaries; per-session capabilities (`attach` /
+`write` / `manage`); CLI and admin panel for user management; sidebar share
+modal for granting per-session access; ed25519 peer-key handshake and
+`peers.toml` registry for cross-instance session aggregation; sidebar
+groups local + each peer's sessions. Best-effort audit log covering login,
+attach, create, kill, rename, grant, revoke, add-user, remove-user,
+peer-create-toggle, peer-add, peer-remove. **Documented MVP follow-ups:**
+TLS cert pinning + federated `/ws/attach` proxy. See `docs/INSTALL.md`
+for install instructions and `docs/superpowers/plans/` for milestones.
 
 ## Dev setup
 
