@@ -22,3 +22,16 @@ async fn health_returns_ok() {
         .unwrap();
     assert_eq!(body, "ok");
 }
+
+#[tokio::test]
+async fn root_serves_index_html() {
+    let addr = spawn_app().await;
+    let body = reqwest::get(format!("http://{addr}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("<title>terminal-hub</title>"), "got: {body}");
+    assert!(body.contains("xterm"), "should reference xterm.js");
+}
