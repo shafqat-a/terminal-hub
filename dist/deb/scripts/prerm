@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run by dpkg before files are removed. Per-user services can't be stopped
+# from here (they run as the user, not root); INSTALL.md documents the
+# uninstall steps. This script is a deliberate no-op so dpkg has a valid
+# maintainer-script hook.
+set -e
+exit 0

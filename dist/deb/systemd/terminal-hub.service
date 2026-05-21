@@ -1,0 +1,17 @@
+[Unit]
+Description=terminal-hub web server
+After=tmux-server.service
+Wants=tmux-server.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/terminal-hub
+Environment="TERMINAL_HUB_BIND=127.0.0.1:5999"
+Environment="TERMINAL_HUB_PUBLIC_URL=https://localhost:5999/"
+Environment="TERMINAL_HUB_CONFIG_DIR=%h/.config/terminal-hub"
+Environment="TERMINAL_HUB_STATIC_DIR=/usr/share/terminal-hub/static"
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

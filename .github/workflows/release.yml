@@ -43,9 +43,19 @@ jobs:
           cp README.md "$ARTIFACT/" 2>/dev/null || true
           tar -czf "${ARTIFACT}.tar.gz" "$ARTIFACT"
           ls -l "${ARTIFACT}.tar.gz"
+      - name: Build .deb (linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo install cargo-deb --version '~2'
+          TARGET=${{ matrix.target }} sh dist/build-deb.sh
+          # Move the produced .deb to the workspace root for easy upload.
+          find target -maxdepth 4 -name '*.deb' -exec cp {} . \;
+          ls -l ./*.deb
       - uses: softprops/action-gh-release@v2
         with:
-          files: terminal-hub-*.tar.gz
+          files: |
+            terminal-hub-*.tar.gz
+            *.deb
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -178,6 +178,12 @@ pub async fn router_with(cfg: Config, store: db::Store) -> anyhow::Result<Router
 }
 
 fn static_dir() -> std::path::PathBuf {
+    // System-installed builds (e.g. the .deb) set TERMINAL_HUB_STATIC_DIR to
+    // /usr/share/terminal-hub/static. Dev/cargo-run falls back to the
+    // crate-relative `static/` dir.
+    if let Ok(p) = std::env::var("TERMINAL_HUB_STATIC_DIR") {
+        return std::path::PathBuf::from(p);
+    }
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("static");
     p

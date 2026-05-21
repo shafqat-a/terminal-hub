@@ -6,6 +6,58 @@
 - **An ed25519 SSH keypair** on every machine you intend to log in from (passkey enrollment is gated by SSH-key proof-of-possession).
 - For native builds from source: **Rust ≥ 1.86** (toolchain pinned in `rust-toolchain.toml`).
 
+## Debian / Ubuntu (`.deb` package)
+
+```sh
+sudo dpkg -i terminal-hub_<version>_amd64.deb
+sudo apt-get install -f   # pull in tmux + libgcc deps if missing
+```
+
+What lands on disk:
+
+| Path | Purpose |
+|---|---|
+| `/usr/bin/terminal-hub` | Web server binary |
+| `/usr/bin/terminal-hub-cli` | Admin CLI |
+| `/usr/share/terminal-hub/static/` | Frontend assets (HTML/CSS/JS) |
+| `/usr/lib/systemd/user/terminal-hub.service` | Systemd-user unit (web server) |
+| `/usr/lib/systemd/user/tmux-server.service` | Systemd-user unit (tmux backend) |
+| `/usr/share/doc/terminal-hub/` | INSTALL.md, README.md, config.sample.toml |
+
+Per-user state still lives under `~/.config/terminal-hub/` (DB, TLS cert + key, peer keypair, peers.toml). The systemd unit sets `TERMINAL_HUB_CONFIG_DIR=%h/.config/terminal-hub` so it works for every user that enables the service.
+
+**First-time per-user setup after `dpkg -i`:**
+
+```sh
+# 1. Bootstrap your primary user (writes ~/.config/terminal-hub/state.db).
+terminal-hub-cli bootstrap --email you@example.com --pubkey ~/.ssh/id_ed25519.pub
+
+# 2. Enable the services for your user.
+systemctl --user enable --now tmux-server.service terminal-hub.service
+
+# 3. Keep services running after logout (one-time per machine, root-only).
+sudo loginctl enable-linger $(whoami)
+
+# 4. Sign in.
+xdg-open https://localhost:5999/login.html
+```
+
+**Building the `.deb` yourself:**
+
+```sh
+cargo install cargo-deb
+sh dist/build-deb.sh
+# Output: target/x86_64-unknown-linux-musl/debian/terminal-hub_<version>_amd64.deb
+```
+
+**Uninstall:**
+
+```sh
+systemctl --user disable --now terminal-hub.service tmux-server.service
+sudo dpkg -r terminal-hub
+# Optionally also: rm -rf ~/.config/terminal-hub  # wipes DB, keys, peers
+```
+
 ## Linux / macOS (native install)
 
 1. Download the latest release tarball matching your OS/arch from GitHub Releases (`terminal-hub-<version>-<target>.tar.gz`).

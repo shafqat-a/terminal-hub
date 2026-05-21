@@ -1,0 +1,32 @@
+#!/bin/sh
+# Run by dpkg after files are unpacked.
+
+set -e
+
+# Reload systemd's unit files so terminal-hub.service + tmux-server.service
+# become visible. `|| true` keeps install successful when systemd isn't
+# present (e.g. in a container without /run/systemd/system).
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+
+cat <<EOF
+
+terminal-hub installed. Next steps for your user:
+
+  1. Bootstrap the primary user (only once):
+       terminal-hub-cli bootstrap --email you@example.com --pubkey ~/.ssh/id_ed25519.pub
+
+  2. Enable + start the services:
+       systemctl --user enable --now tmux-server.service terminal-hub.service
+
+  3. (One-time per machine) Keep the user services running when you log out:
+       sudo loginctl enable-linger \$(whoami)
+
+  4. Browse to https://localhost:5999/login.html, then from a laptop:
+       terminal-hub-cli enroll --server https://<host>:5999 --email you@example.com --insecure
+
+  See /usr/share/doc/terminal-hub/INSTALL.md for federation setup.
+EOF
+
+exit 0

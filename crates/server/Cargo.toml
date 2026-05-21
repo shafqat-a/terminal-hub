@@ -2,6 +2,8 @@
 name = "terminal-hub-server"
 version = "0.1.0"
 edition.workspace = true
+description = "Browser-accessible tmux-backed terminal multiplexer with multi-user ACLs and federation"
+license = "MIT OR Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
@@ -9,6 +11,35 @@ path = "src/lib.rs"
 [[bin]]
 name = "terminal-hub"
 path = "src/main.rs"
+
+# cargo-deb metadata: build with `cargo deb -p terminal-hub-server`.
+# The terminal-hub-cli binary is pulled in via merge-from = "../cli/Cargo.toml"
+# — but cargo-deb doesn't support that, so we list it as an explicit asset
+# from target/release/. The .deb consumer must therefore run
+# `cargo build --release -p terminal-hub-cli` first (handled by dist/build-deb.sh).
+[package.metadata.deb]
+name = "terminal-hub"
+maintainer = "terminal-hub maintainers"
+copyright = "2026, terminal-hub authors"
+extended-description = """\
+A Rust web server that hosts long-lived terminal sessions backed by tmux and
+exposes them through a browser. Supports SSH-key bootstrap + WebAuthn passkey
+login, per-session ACLs for multi-user instances, and federation across
+multiple instances via an ed25519 peer-key handshake."""
+section = "net"
+priority = "optional"
+depends = "tmux (>= 3.0), $auto"
+assets = [
+    ["target/release/terminal-hub", "/usr/bin/", "755"],
+    ["target/release/terminal-hub-cli", "/usr/bin/", "755"],
+    ["static/**/*", "/usr/share/terminal-hub/static/", "644"],
+    ["../../dist/deb/systemd/terminal-hub.service", "/usr/lib/systemd/user/", "644"],
+    ["../../dist/deb/systemd/tmux-server.service", "/usr/lib/systemd/user/", "644"],
+    ["../../dist/config.sample.toml", "/usr/share/doc/terminal-hub/", "644"],
+    ["../../docs/INSTALL.md", "/usr/share/doc/terminal-hub/", "644"],
+    ["../../README.md", "/usr/share/doc/terminal-hub/", "644"],
+]
+maintainer-scripts = "../../dist/deb/scripts"
 
 [dependencies]
 tokio = { workspace = true }
