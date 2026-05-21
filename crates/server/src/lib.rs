@@ -10,6 +10,7 @@ pub mod hub;
 pub mod paths;
 pub mod session_id;
 pub mod sessions;
+pub mod tls;
 
 pub struct Config {
     pub tmux_socket: String,
