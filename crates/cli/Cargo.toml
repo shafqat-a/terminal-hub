@@ -18,6 +18,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { workspace = true }
 base64 = "0.22"
-rusqlite = { version = "0.31", features = ["bundled"] }
-directories-next = "2"
+terminal-hub-server = { path = "../server" }
 url = "2"

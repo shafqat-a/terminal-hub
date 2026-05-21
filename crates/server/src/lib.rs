@@ -15,6 +15,7 @@ pub mod permissions;
 pub mod session_id;
 pub mod sessions;
 pub mod tls;
+pub mod users;
 
 #[derive(Clone)]
 pub struct Config {
@@ -109,6 +110,23 @@ pub async fn router_with(cfg: Config, store: db::Store) -> anyhow::Result<Router
             axum::routing::patch(api::rename).delete(api::kill),
         )
         .route("/ws/attach/:id", any(attach::ws_attach))
+        .route("/api/users", get(api::users_list).post(api::users_add))
+        .route(
+            "/api/users/:email",
+            axum::routing::delete(api::users_remove),
+        )
+        .route(
+            "/api/permissions/session/:session_id",
+            get(api::perm_list).post(api::perm_grant),
+        )
+        .route(
+            "/api/permissions/session/:session_id/:user_email",
+            axum::routing::delete(api::perm_revoke_handler),
+        )
+        .route(
+            "/api/permissions/peer-create",
+            post(api::peer_create_toggle),
+        )
         .merge(auth_routes)
         .fallback_service(ServeDir::new(static_dir()))
         .layer(axum::middleware::from_fn_with_state(
