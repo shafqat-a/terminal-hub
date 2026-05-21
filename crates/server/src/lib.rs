@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tower_http::services::ServeDir;
 
 mod attach;
+pub mod session_id;
 
 pub struct Config {
     pub tmux_socket: String,
