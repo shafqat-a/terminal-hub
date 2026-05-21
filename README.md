@@ -4,13 +4,13 @@ A Rust web server that hosts long-lived terminal sessions backed by tmux and exp
 
 ## Status
 
-M1 (walking skeleton) — one hardcoded session, no auth. See `docs/superpowers/plans/` for milestones.
+M2 (multi-session local) — sidebar with create/kill/switch, multi-tab mirroring, scrollback replay. No auth yet. See `docs/superpowers/plans/` for milestones.
 
 ## Dev setup
 
 Requires Rust ≥ 1.79, tmux ≥ 3.0.
 
-    tmux -L terminal-hub new-session -d -s scratch
+    tmux -L terminal-hub new-session -d -s _boot
     cargo run -p terminal-hub-server
     open http://127.0.0.1:5999/
 

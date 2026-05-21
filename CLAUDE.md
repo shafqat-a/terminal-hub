@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-M1 (walking skeleton) complete. Cargo workspace with three crates (`tmux-client`, `server`, `cli`). One hardcoded tmux session attachable in the browser at `/`. No auth yet. See `docs/superpowers/specs/2026-05-21-terminal-hub-design.md` for the full design and `docs/superpowers/plans/` for milestone plans.
+M2 (multi-session local) complete. Cargo workspace with three crates (`tmux-client`, `server`, `cli`). Sidebar UI lists tmux sessions, supports create/kill/switch; multi-tab mirroring + scrollback replay work via per-session broadcast Hub. No auth yet. See `docs/superpowers/specs/2026-05-21-terminal-hub-design.md` for the full design and `docs/superpowers/plans/` for milestone plans.
 
 Build: `cargo build --workspace`
 Test: `cargo test --workspace` (some tests require `tmux` on PATH)
-Run: `cargo run -p terminal-hub-server` (after `tmux -L terminal-hub new-session -d -s scratch`)
+Run: `cargo run -p terminal-hub-server` (after `tmux -L terminal-hub new-session -d -s _boot`)
 
 ## Product intent
 
