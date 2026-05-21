@@ -110,6 +110,7 @@ pub async fn router_with(cfg: Config, store: db::Store) -> anyhow::Result<Router
             axum::routing::patch(api::rename).delete(api::kill),
         )
         .route("/ws/attach/:id", any(attach::ws_attach))
+        .route("/api/me", get(api::me))
         .route("/api/users", get(api::users_list).post(api::users_add))
         .route(
             "/api/users/:email",

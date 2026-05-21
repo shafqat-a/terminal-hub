@@ -161,6 +161,27 @@ async fn two_tabs_mirror_same_session() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn me_returns_email_and_role() {
+    let socket = "terminal-hub-test-m4-api-me";
+    ensure(socket);
+    let (addr, cookie) = spawn(socket).await;
+    let ch = cookie_header(&cookie);
+    let c = reqwest::Client::new();
+    let resp: serde_json::Value = c
+        .get(format!("http://{addr}/api/me"))
+        .header("cookie", &ch)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["email"], "test@example.com");
+    assert_eq!(resp["role"], "primary");
+    kill(socket);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn reattach_replays_scrollback() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let socket = "terminal-hub-test-m2-api-scroll";

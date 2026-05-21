@@ -367,3 +367,18 @@ fn users500(e: users::Error) -> (StatusCode, String) {
     };
     (code, e.to_string())
 }
+
+/// `GET /api/me` — return the calling user's email and role. The frontend uses
+/// this to decide whether to render the share / admin affordances; the server
+/// still enforces every action via `RequirePrimary` regardless.
+pub async fn me(
+    AuthUser { email }: AuthUser,
+    State(s): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let role = match permissions::lookup_role(&s.auth.store, &email).await {
+        Ok(permissions::Role::Primary) => "primary",
+        Ok(permissions::Role::Secondary) => "secondary",
+        Err(e) => return Err(perm500(e)),
+    };
+    Ok(Json(serde_json::json!({ "email": email, "role": role })))
+}

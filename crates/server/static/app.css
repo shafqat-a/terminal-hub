@@ -21,3 +21,30 @@ body { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
 #session-list li button:hover { color: #f55; }
 
 #terminal { padding: 8px; overflow: hidden; }
+
+/* ---- Share modal (M4) ---- */
+#session-list li button.share-btn { color: #888; }
+#session-list li button.share-btn:hover { color: #6cf; }
+
+.share-modal__backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.share-modal__panel {
+  background: #1c1c1c; color: #ddd; border: 1px solid #333;
+  border-radius: 6px; padding: 16px 20px; width: 420px; max-width: 92vw;
+  font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.share-modal h2 { margin: 0 0 12px 0; font-size: 14px; }
+.share-modal table { width: 100%; border-collapse: collapse; }
+.share-modal th, .share-modal td { text-align: left; padding: 4px 6px; }
+.share-modal th { color: #888; font-weight: 400; font-size: 11px; text-transform: uppercase; }
+.share-modal tr + tr td { border-top: 1px solid #2a2a2a; }
+.share-modal td.cap { text-align: center; }
+.share-modal__empty { color: #888; padding: 12px 4px; text-align: center; }
+.share-modal__actions { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
+.share-modal__actions button { background: #2a2a2a; color: #ddd; border: 0;
+  padding: 6px 12px; cursor: pointer; border-radius: 3px; }
+.share-modal__actions button.primary { background: #2d6cdf; color: #fff; }
+.share-modal__actions button:hover { background: #353535; }
+.share-modal__actions button.primary:hover { background: #3a7ae8; }
