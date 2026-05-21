@@ -20,7 +20,7 @@ tower = "0.5"
 tower-http = { version = "0.5", features = ["fs", "trace"] }
 tmux-client = { path = "../tmux-client" }
 thiserror = { workspace = true }
-uuid = { version = "1", features = ["v7", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories-next = "2"
@@ -34,6 +34,8 @@ auth-core = { path = "../auth-core" }
 argon2 = "0.5"
 base64 = "0.22"
 rand = "0.8"
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+url = "2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "test-util"] }

@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod challenge;
+pub mod passkey;
 
 /// Hash a cookie value (or any opaque secret) with SHA-256 for storage in the DB.
 /// We don't need argon2 here because the secret is full-entropy (32 random bytes
