@@ -8,3 +8,4 @@ pub mod handshake;
 pub mod identity;
 pub mod inbound;
 pub mod outbound;
+pub mod pinned_client;
