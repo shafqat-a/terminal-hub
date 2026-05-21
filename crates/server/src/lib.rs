@@ -6,6 +6,7 @@ use tower_http::services::ServeDir;
 pub mod api;
 pub mod attach;
 pub mod hub;
+pub mod paths;
 pub mod session_id;
 pub mod sessions;
 
