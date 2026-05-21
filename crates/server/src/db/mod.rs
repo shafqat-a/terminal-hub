@@ -186,6 +186,28 @@ impl Store {
         Ok(rows)
     }
 
+    pub async fn list_bootstrap_tokens_for_all_users(
+        &self,
+    ) -> anyhow::Result<Vec<BootstrapTokenRow>> {
+        let g = self.inner.lock().await;
+        let mut stmt = g.prepare(
+            "SELECT token_hash, user_email, issued_at, expires_at, consumed_at
+             FROM bootstrap_tokens WHERE consumed_at IS NULL AND expires_at > ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![now_secs()], |r| {
+                Ok(BootstrapTokenRow {
+                    token_hash: r.get(0)?,
+                    user_email: r.get(1)?,
+                    issued_at: r.get(2)?,
+                    expires_at: r.get(3)?,
+                    consumed_at: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub async fn consume_bootstrap_token(&self, hash: &[u8]) -> anyhow::Result<bool> {
         let g = self.inner.lock().await;
         let n = g.execute(
