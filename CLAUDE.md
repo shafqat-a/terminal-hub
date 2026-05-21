@@ -4,11 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-M3 (single-user auth + TLS) complete. Cargo workspace: `tmux-client`, `auth-core`,
-`server`, `cli`. Self-signed TLS via `rcgen`. SQLite user store via `rusqlite`
-(bundled). SSH-key challenge / WebAuthn passkey enrollment via the CLI. Cookie-gated
-HTTP + WebSocket sessions. Exactly one primary user; multi-user permissions and
-federation land in M4. See `docs/superpowers/specs/2026-05-21-terminal-hub-design.md`
+M4 (multi-user + per-session ACLs) complete. Cargo workspace: `tmux-client`,
+`auth-core`, `server`, `cli`. Schema migration `0002_permissions.sql` added
+`permissions` and `peer_create_allowed` tables plus `peer_id` / `session_id`
+columns on `audit_log`. Every handler in `api.rs` and `/ws/attach/:id`
+enforces capabilities for secondaries (`ATTACH=1`, `WRITE=2`, `MANAGE=4`);
+primary always bypasses. `terminal-hub-cli add-user / remove-user / list-users`
+manage secondaries on the server host. Grant UI is a modal launched from each
+sidebar row (primary-only, gated by `/api/me`); admin panel at
+`/admin/users.html` lists/adds/removes users. Audit log records login, attach,
+create, kill, rename, grant, revoke, add-user, remove-user, and
+peer-create-toggle (best-effort writes — log failures never fail the request).
+
+Federation is not yet implemented — `peer_id` is always `"local"` in M4.
+Next: M5 (cross-peer sessions, peer keypair, authorized_peers,
+lazy on-demand connections). See `docs/superpowers/specs/2026-05-21-terminal-hub-design.md`
 for the full design and `docs/superpowers/plans/` for milestone plans.
 
 Build: `cargo build --workspace`

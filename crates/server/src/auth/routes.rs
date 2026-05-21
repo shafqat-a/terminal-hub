@@ -212,6 +212,10 @@ pub async fn post_passkey_login_finish(
     c.set_path("/");
     c.set_max_age(cookie::time::Duration::seconds(COOKIE_TTL_SECS));
     cookies.add(c);
+    // Spec §7: log every successful login via the unified M4 audit helper so
+    // peer_id / session_id columns stay populated (NULL here, but consistent
+    // shape with attach/create/kill rows).
+    crate::audit::log(&s.store, &email, "login", None, None, None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
