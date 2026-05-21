@@ -5,7 +5,7 @@ use tmux_client::conn::Connection;
 use tmux_client::protocol::Event;
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct SessionInfo {
     pub id: SessionId,
     pub display_name: String,

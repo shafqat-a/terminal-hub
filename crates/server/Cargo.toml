@@ -41,12 +41,13 @@ tower-cookies = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["std"] }
 toml = "0.8"
+reqwest = { version = "0.12.15", default-features = false, features = ["rustls-tls", "json"] }
+futures-util = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "test-util"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies"] }
+reqwest = { version = "0.12.15", default-features = false, features = ["rustls-tls", "json", "cookies"] }
 tokio-tungstenite = "0.23"
-futures-util = "0.3"
 tempfile = "3"
 rand = "0.8"
 ssh-key = { version = "0.6", features = ["ed25519"] }

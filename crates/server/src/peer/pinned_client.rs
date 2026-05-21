@@ -1,15 +1,16 @@
 //! Outbound HTTP client for talking to a federated peer.
 //!
-//! **Security posture (MVP, M5):**
+//! Security posture (MVP, M5):
 //!
-//! - Peer identity is established cryptographically via the `/peer/challenge`
-//!   + `/peer/auth` handshake (ed25519 signature on a fresh challenge). That
-//!   handshake is forge-proof regardless of what TLS does.
-//! - The TLS cert presented by the peer is *currently not pinned* — the
-//!   client accepts any self-signed cert (`danger_accept_invalid_certs(true)`).
-//! - An active network MitM (e.g. an attacker on the peer's LAN) can still
-//!   observe and modify the bytes flowing between A and B, even though they
-//!   can't impersonate B's peer key.
+//! Peer identity is established cryptographically via the `/peer/challenge`
+//! and `/peer/auth` handshake (ed25519 signature on a fresh challenge). That
+//! handshake is forge-proof regardless of what TLS does.
+//!
+//! The TLS cert presented by the peer is currently NOT pinned — the client
+//! accepts any self-signed cert via `danger_accept_invalid_certs(true)`. An
+//! active network MitM on the peer's LAN can still observe and modify the
+//! bytes flowing between A and B, even though they can't impersonate B's
+//! peer key.
 //!
 //! For the M5 small-fleet homelab scenario this tradeoff is accepted; the
 //! spec's §10 cert pinning requirement is tracked as a security follow-up.

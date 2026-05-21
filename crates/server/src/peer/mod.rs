@@ -3,6 +3,7 @@
 //! M5 Task 1-4 scope. Subsequent tasks add the inbound `/peer/challenge` and
 //! `/peer/auth` handlers and the outbound TLS-pinned `PeerClient`.
 
+pub mod federation;
 pub mod fingerprint;
 pub mod handshake;
 pub mod identity;
