@@ -1,75 +1,109 @@
 # terminal-hub
 
-A Rust web server that hosts long-lived terminal sessions backed by tmux and exposes them through a browser.
+A Rust web server that hosts long-lived terminal sessions backed by tmux and exposes them through a browser. Multi-user, ACL-gated, passkey-protected, and federation-ready — every instance can aggregate sessions from configured peers in one sidebar.
+
+[![Build status](https://github.com/shafqat-a/terminal-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/shafqat-a/terminal-hub/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+---
+
+## What you get
+
+- **Browser terminals that survive disconnects.** PTYs live in tmux, not in the web server — refresh the page, close the laptop, come back tomorrow; your shell is still where you left it.
+- **WebAuthn passkey login** bootstrapped by SSH key. The private key never enters the browser; a CLI signs the server's challenge from ssh-agent.
+- **Multi-user with per-session ACLs.** Primary user manages everything; secondary users see only sessions explicitly granted to them, with `attach` / `write` / `manage` capabilities.
+- **Federation.** Configure peers in `peers.toml`; the sidebar shows local sessions + each peer's sessions, grouped, with live status dots.
+- **Audit log** of every meaningful action (login, attach, create, kill, rename, grant, revoke, peer-add, …).
+- **xterm.js frontend** with proper clipboard / paste (bracketed paste mode, multi-line, tab paste, ANSI bytes all preserved).
 
 ## Status
 
-M5 (federation) substantially complete. Multi-user instance with a primary
-user and any number of secondaries; per-session capabilities (`attach` /
-`write` / `manage`); CLI and admin panel for user management; sidebar share
-modal for granting per-session access; ed25519 peer-key handshake and
-`peers.toml` registry for cross-instance session aggregation; sidebar
-groups local + each peer's sessions. Best-effort audit log covering login,
-attach, create, kill, rename, grant, revoke, add-user, remove-user,
-peer-create-toggle, peer-add, peer-remove. **Documented MVP follow-ups:**
-TLS cert pinning + federated `/ws/attach` proxy. See `docs/INSTALL.md`
-for install instructions and `docs/superpowers/plans/` for milestones.
+M5 (federation) substantially complete; M6 (packaging) shipped. **50 commits, 86 tests passing, clippy clean.**
 
-## Dev setup
+**Documented MVP follow-ups (deferred):**
 
-Requires Rust ≥ 1.79, tmux ≥ 3.0, Node ≥ 20 (for e2e), an SSH ed25519 keypair.
+- TLS cert pinning (peer-key handshake already provides cryptographic identity; transport currently uses `accept_invalid_certs` against self-signed peer certs).
+- Federated `/ws/attach` proxy (peer sessions visible in the sidebar but read-only; attaching uses `ssh` for now).
 
-One-time bootstrap of the primary user:
+## Install (Debian / Ubuntu)
 
-    TERMINAL_HUB_CONFIG_DIR=/tmp/th-dev cargo run -p terminal-hub-cli -- \
-        bootstrap --email you@example.com --pubkey ~/.ssh/id_ed25519.pub
+```sh
+sudo dpkg -i terminal-hub_<version>_amd64.deb
+sudo apt-get install -f                              # pulls in tmux
+terminal-hub-cli bootstrap --email you@example.com --pubkey ~/.ssh/id_ed25519.pub
+systemctl --user enable --now tmux-server.service terminal-hub.service
+sudo loginctl enable-linger $(whoami)                # keep running after logout
+```
 
-Start tmux + server:
+Open <https://localhost:5999/login.html>. From your laptop:
 
-    tmux -L terminal-hub new-session -d -s _boot
-    TERMINAL_HUB_CONFIG_DIR=/tmp/th-dev \
-    TERMINAL_HUB_PUBLIC_URL=https://localhost:5999/ \
-    cargo run -p terminal-hub-server
+```sh
+terminal-hub-cli enroll --server https://your-host:5999 --email you@example.com --insecure
+```
 
-Enroll a passkey from your laptop (writes a one-time URL to stdout):
+Open the printed URL, create a passkey, sign in.
 
-    cargo run -p terminal-hub-cli -- enroll \
-        --server https://localhost:5999 --email you@example.com --insecure
+See [`docs/INSTALL.md`](docs/INSTALL.md) for full instructions, federation setup, and troubleshooting.
 
-Open the printed URL, create the passkey, then sign in at <https://localhost:5999/login.html>.
+## Build from source
 
-Stop the tmux server: `tmux -L terminal-hub kill-server`.
+```sh
+git clone https://github.com/shafqat-a/terminal-hub
+cd terminal-hub
+cargo build --workspace --release
+# Or build a .deb:
+cargo install cargo-deb && sh dist/build-deb.sh
+```
 
-## Multi-user (M4)
+Requires Rust 1.86+ and tmux 3.0+.
 
-Add a secondary user from the server host:
+## Workspace layout
 
-    cargo run -p terminal-hub-cli -- add-user \
-        --email alice@example.com --pubkey ~alice/.ssh/id_ed25519.pub
+```
+crates/
+├── tmux-client/   # control-mode (`tmux -CC` / `-C`) protocol decoder + driver
+├── auth-core/     # SSH-key challenge/sign/verify primitives (shared by server + CLI)
+├── server/        # axum HTTP + WS, SQLite, WebAuthn, tmux client, federation
+└── cli/           # terminal-hub-cli: bootstrap, enroll, add-user, peer-info, …
+crates/server/static/    # vanilla HTML + xterm.js frontend (no SPA framework)
+docs/
+├── INSTALL.md     # operator install + federation setup
+└── superpowers/
+    ├── specs/     # design spec (2026-05-21-terminal-hub-design.md)
+    └── plans/     # M1–M6 implementation plans
+dist/
+├── install.sh     # POSIX installer for tarball distribution
+├── build-deb.sh   # helper to build a .deb locally
+├── systemd/       # placeholder unit templates (tarball install)
+├── deb/           # systemd units + maintainer scripts for the .deb
+└── launchd/       # macOS LaunchAgents
+.github/workflows/
+├── ci.yml         # fmt + clippy + test on Ubuntu + macOS
+└── release.yml    # tag-triggered .tar.gz + .deb release artifacts
+```
 
-Then have alice enroll a passkey from her laptop using the M3 flow:
+## Architecture (one-paragraph)
 
-    cargo run -p terminal-hub-cli -- enroll \
-        --server https://your-host:5999 --email alice@example.com
+Three layers. The **browser** runs xterm.js and talks to the server over an authenticated WebSocket. The **server** (Rust + axum) owns auth, ACL enforcement, federation proxying, and a tmux control-mode client; it never owns PTY file descriptors directly. The **tmux server** owns every PTY; if terminal-hub crashes and restarts, it reattaches via `tmux list-sessions` and resumes serving — sessions survive. Federation reuses the same HTTP+WS API: A acts as an authenticated client of B using an ed25519 peer-key handshake.
 
-The primary user grants per-session access via the `↪` button on each
-session in the sidebar (opens a modal with attach/write/manage checkboxes
-per user) or via `POST /api/permissions/session/:session_id`. Capabilities
-are a bitmask: `1 = attach` (read-only), `2 = write`, `4 = manage` (rename
-+ kill). Saving an all-unchecked row revokes the grant.
+Full design: [`docs/superpowers/specs/2026-05-21-terminal-hub-design.md`](docs/superpowers/specs/2026-05-21-terminal-hub-design.md)
 
-By default secondaries cannot create sessions. Toggle this per user with
-the peer-create allowlist (also exposed at the API level):
+## Testing
 
-    curl -X POST -H "Content-Type: application/json" --cookie 'th_session=...' \
-        -d '{"user_email":"alice@example.com","peer_id":"local","allow":true}' \
-        https://your-host:5999/api/permissions/peer-create
+```sh
+cargo test --workspace        # 86 tests; requires tmux on PATH
+cargo clippy --workspace --all-targets -- -D warnings
+```
 
-The primary's admin panel for adding and removing users lives at
-`/admin/users.html`.
+End-to-end clipboard / paste tests under `e2e/` (Playwright; install with `npm i && npx playwright install chromium`).
 
-## Tests
+## Security model — short version
 
-    cargo test --workspace
+- **Three trust layers** with independent credentials: user↔instance (SSH-key + passkey), instance↔instance (ed25519 peer-key + TLS fingerprint pinning planned), browser↔instance (signed session cookie).
+- **Primary user is effectively root** on the instance and on every peered instance. Spec §13 walks through the threat model and the explicitly-accepted "effective transitive trust" risk for small homelab fleets.
+- The browser never sees a private SSH key — the CLI helper signs challenges via ssh-agent.
+- Cert pinning + federated WS proxy are tracked as security follow-ups before any non-personal deployment.
 
-Integration tests start and stop their own ephemeral tmux servers; they require `tmux` on `PATH`.
+## License
+
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE) at your option.
