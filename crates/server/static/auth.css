@@ -1,0 +1,16 @@
+html, body { margin: 0; height: 100%; background: #111; color: #ddd;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+body.auth { display: grid; place-items: center; }
+.card { background: #181818; border: 1px solid #2a2a2a; border-radius: 8px;
+  padding: 32px; width: 360px; }
+.card h1 { font-size: 16px; text-transform: uppercase; letter-spacing: 0.08em;
+  margin: 0 0 24px 0; color: #aaa; }
+.card label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
+.card input { width: 100%; padding: 8px; background: #111; color: #ddd;
+  border: 1px solid #333; border-radius: 4px; box-sizing: border-box; }
+.card button { width: 100%; padding: 10px; margin-top: 20px; background: #2a2a2a;
+  color: #ddd; border: 0; border-radius: 4px; cursor: pointer; font-size: 14px; }
+.card button:hover { background: #353535; }
+.card button:disabled { opacity: 0.5; cursor: not-allowed; }
+.card .err { color: #f55; font-size: 12px; margin-top: 12px; min-height: 1.4em; }
+.card .ok  { color: #5f5; font-size: 12px; margin-top: 12px; min-height: 1.4em; }
