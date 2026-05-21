@@ -287,6 +287,234 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// M4: write a full audit row including peer/session context.
+    pub async fn audit_full(
+        &self,
+        user_email: Option<&str>,
+        action: &str,
+        peer_id: Option<&str>,
+        session_id: Option<&str>,
+        details_json: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let g = self.inner.lock().await;
+        g.execute(
+            "INSERT INTO audit_log(ts, user_email, action, peer_id, session_id, details)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now_secs(), user_email, action, peer_id, session_id, details_json],
+        )?;
+        Ok(())
+    }
+
+    // ---------- M4 permissions ----------
+
+    pub async fn get_permission_caps(
+        &self,
+        user_email: &str,
+        peer_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Option<u32>> {
+        let g = self.inner.lock().await;
+        let row = g
+            .query_row(
+                "SELECT capabilities FROM permissions
+                 WHERE user_email = ?1 AND peer_id = ?2 AND session_id = ?3",
+                params![user_email, peer_id, session_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(row.map(|v| v as u32))
+    }
+
+    pub async fn list_visible_session_ids(
+        &self,
+        user_email: &str,
+        peer_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let g = self.inner.lock().await;
+        let mut stmt = g.prepare(
+            "SELECT session_id FROM permissions
+             WHERE user_email = ?1 AND peer_id = ?2 AND (capabilities & 1) != 0",
+        )?;
+        let rows = stmt
+            .query_map(params![user_email, peer_id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub async fn upsert_permission(
+        &self,
+        user_email: &str,
+        peer_id: &str,
+        session_id: &str,
+        capabilities: u32,
+        granted_by: &str,
+    ) -> anyhow::Result<()> {
+        let g = self.inner.lock().await;
+        g.execute(
+            "INSERT INTO permissions(user_email, peer_id, session_id, capabilities, granted_by, granted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(user_email, peer_id, session_id)
+             DO UPDATE SET capabilities = excluded.capabilities,
+                           granted_by   = excluded.granted_by,
+                           granted_at   = excluded.granted_at",
+            params![user_email, peer_id, session_id, capabilities as i64, granted_by, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    pub async fn delete_permission(
+        &self,
+        user_email: &str,
+        peer_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let g = self.inner.lock().await;
+        g.execute(
+            "DELETE FROM permissions WHERE user_email = ?1 AND peer_id = ?2 AND session_id = ?3",
+            params![user_email, peer_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub async fn delete_permissions_for_session(
+        &self,
+        peer_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let g = self.inner.lock().await;
+        g.execute(
+            "DELETE FROM permissions WHERE peer_id = ?1 AND session_id = ?2",
+            params![peer_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub async fn list_grants_for_session(
+        &self,
+        peer_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<(String, u32, String, i64)>> {
+        let g = self.inner.lock().await;
+        let mut stmt = g.prepare(
+            "SELECT user_email, capabilities, granted_by, granted_at
+             FROM permissions
+             WHERE peer_id = ?1 AND session_id = ?2
+             ORDER BY user_email",
+        )?;
+        let rows = stmt
+            .query_map(params![peer_id, session_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)? as u32,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub async fn peer_create_allowed(
+        &self,
+        user_email: &str,
+        peer_id: &str,
+    ) -> anyhow::Result<bool> {
+        let g = self.inner.lock().await;
+        let n: i64 = g.query_row(
+            "SELECT COUNT(*) FROM peer_create_allowed WHERE user_email = ?1 AND peer_id = ?2",
+            params![user_email, peer_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    pub async fn set_peer_create_allowed(
+        &self,
+        user_email: &str,
+        peer_id: &str,
+        allowed: bool,
+        granted_by: &str,
+    ) -> anyhow::Result<()> {
+        let g = self.inner.lock().await;
+        if allowed {
+            g.execute(
+                "INSERT INTO peer_create_allowed(user_email, peer_id, granted_by, granted_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(user_email, peer_id) DO NOTHING",
+                params![user_email, peer_id, granted_by, now_secs()],
+            )?;
+        } else {
+            g.execute(
+                "DELETE FROM peer_create_allowed WHERE user_email = ?1 AND peer_id = ?2",
+                params![user_email, peer_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    // ---------- M4 users ----------
+
+    pub async fn primary_email(&self) -> anyhow::Result<Option<String>> {
+        let g = self.inner.lock().await;
+        let row = g
+            .query_row(
+                "SELECT email FROM users WHERE role = 'primary' LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub async fn list_users(&self) -> anyhow::Result<Vec<(String, String, i64, bool)>> {
+        let g = self.inner.lock().await;
+        let mut stmt = g.prepare(
+            "SELECT email, role, enrolled_at, passkey_creds IS NOT NULL FROM users ORDER BY email",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)? != 0,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub async fn insert_secondary_user(
+        &self,
+        email: &str,
+        pubkey_openssh: &str,
+    ) -> anyhow::Result<()> {
+        let g = self.inner.lock().await;
+        g.execute(
+            "INSERT INTO users(email, pubkey_openssh, role, enrolled_at)
+             VALUES (?1, ?2, 'secondary', ?3)",
+            params![email, pubkey_openssh, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    pub async fn delete_user(&self, email: &str) -> anyhow::Result<()> {
+        let g = self.inner.lock().await;
+        // FK ON DELETE CASCADE on permissions/peer_create_allowed/sessions/
+        // bootstrap_tokens carries everything else with it.
+        g.execute("DELETE FROM users WHERE email = ?1", params![email])?;
+        Ok(())
+    }
+
+    pub async fn delete_sessions_for_user(&self, email: &str) -> anyhow::Result<()> {
+        let g = self.inner.lock().await;
+        g.execute(
+            "DELETE FROM sessions WHERE user_email = ?1",
+            params![email],
+        )?;
+        Ok(())
+    }
 }
 
 pub fn now_secs() -> i64 {

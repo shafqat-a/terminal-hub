@@ -10,6 +10,7 @@ pub mod auth;
 pub mod db;
 pub mod hub;
 pub mod paths;
+pub mod permissions;
 pub mod session_id;
 pub mod sessions;
 pub mod tls;
