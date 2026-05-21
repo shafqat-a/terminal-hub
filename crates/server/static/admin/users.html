@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>terminal-hub — admin / users</title>
+    <link rel="stylesheet" href="/app.css">
+    <link rel="stylesheet" href="/admin/admin.css">
+  </head>
+  <body class="admin-page">
+    <main class="admin-shell">
+      <p class="admin-back"><a href="/">&larr; back to sessions</a></p>
+      <h1 class="admin-heading">Users</h1>
+      <table class="admin-table" id="user-table" aria-label="Enrolled users">
+        <thead>
+          <tr>
+            <th scope="col">Email</th>
+            <th scope="col">Role</th>
+            <th scope="col">Passkey</th>
+            <th scope="col" aria-label="actions"></th>
+          </tr>
+        </thead>
+        <tbody id="user-rows"></tbody>
+      </table>
+
+      <h1 class="admin-heading" style="margin-top:32px">Add secondary</h1>
+      <form id="add-form" class="admin-form" autocomplete="off">
+        <label class="admin-field">
+          <span>Email</span>
+          <input id="add-email" type="email" placeholder="alice@example.com" required>
+        </label>
+        <label class="admin-field admin-field--wide">
+          <span>SSH public key (OpenSSH single-line format)</span>
+          <textarea id="add-pubkey"
+                    placeholder="ssh-ed25519 AAAA... comment"
+                    required spellcheck="false"></textarea>
+        </label>
+        <div class="admin-form__actions">
+          <button type="submit" class="admin-btn admin-btn--primary">Add user</button>
+        </div>
+      </form>
+
+      <p id="err" class="admin-err" role="alert"></p>
+      <p id="ok" class="admin-ok" role="status"></p>
+    </main>
+    <script src="/admin/users.js" type="module"></script>
+  </body>
+</html>

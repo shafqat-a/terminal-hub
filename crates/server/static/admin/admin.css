@@ -1,0 +1,98 @@
+/* Shared admin-page styles. Overrides app.css's grid layout so the page can
+   render as a single centred column rather than the sidebar+terminal grid. */
+
+body.admin-page {
+  display: block;
+  padding: 24px;
+  background: #111;
+  color: #ddd;
+}
+
+.admin-shell {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.admin-back a { color: #6cf; text-decoration: none; }
+.admin-back a:hover { text-decoration: underline; }
+
+.admin-heading {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #888;
+  margin: 16px 0 8px 0;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 13px;
+}
+.admin-table th, .admin-table td {
+  padding: 8px;
+  text-align: left;
+  border-bottom: 1px solid #2a2a2a;
+}
+.admin-table th {
+  color: #888;
+  font-weight: 400;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+.admin-table tr:hover td { background: #181818; }
+
+.admin-form {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-top: 12px;
+}
+.admin-field {
+  display: grid;
+  gap: 4px;
+}
+.admin-field > span {
+  color: #888;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.admin-field input,
+.admin-field textarea {
+  background: #181818;
+  color: #ddd;
+  border: 1px solid #2a2a2a;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 13px;
+  border-radius: 3px;
+}
+.admin-field textarea {
+  min-height: 72px;
+  font-family: Menlo, monospace;
+  resize: vertical;
+}
+.admin-form__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.admin-btn {
+  background: #2a2a2a;
+  color: #ddd;
+  border: 0;
+  padding: 6px 14px;
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 13px;
+}
+.admin-btn:hover { background: #353535; }
+.admin-btn--primary { background: #2d6cdf; color: #fff; }
+.admin-btn--primary:hover { background: #3a7ae8; }
+.admin-btn--danger { background: transparent; color: #f55; }
+.admin-btn--danger:hover { background: #2a1818; color: #f99; }
+
+.admin-err { color: #f55; min-height: 1em; margin-top: 12px; }
+.admin-ok  { color: #6f6; min-height: 1em; margin-top: 4px; }
