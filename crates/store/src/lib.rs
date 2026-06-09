@@ -15,6 +15,7 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Debug)]
 pub struct Store {
     pub(crate) conn: Mutex<Connection>,
 }
@@ -43,7 +44,7 @@ impl Store {
     }
 
     pub fn add_auth_session(&self, token: &str, expires_at: i64) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO auth_sessions (token_hash, expires_at) VALUES (?1, ?2)",
             params![hash_token(token), expires_at],
@@ -54,7 +55,7 @@ impl Store {
     /// Returns true when the token exists and has not expired (`now` is unix
     /// seconds). Expired rows are deleted opportunistically.
     pub fn validate_auth_session(&self, token: &str, now: i64) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "DELETE FROM auth_sessions WHERE expires_at <= ?1",
             params![now],
@@ -116,5 +117,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("a/b/conductor.db");
         assert!(Store::open(&nested).is_ok());
+    }
+
+    #[test]
+    fn re_adding_token_updates_expiry() {
+        let (store, _d) = open_temp();
+        store.add_auth_session("tok-abc", 1000).unwrap();
+        store.add_auth_session("tok-abc", 5000).unwrap();
+        // New expiry wins: still valid past the original expiry.
+        assert!(store.validate_auth_session("tok-abc", 2000).unwrap());
     }
 }
