@@ -32,9 +32,21 @@ pub fn build_state(cfg: Config) -> SharedState {
 }
 
 pub fn build_app(state: SharedState) -> Router {
+    let protected = Router::new()
+        .route("/terminal", get(|| async { "terminal placeholder (M2)" }))
+        .route(
+            "/api/sessions",
+            get(|| async { axum::Json(serde_json::json!([])) }),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::middleware::require_auth,
+        ));
+
     Router::new()
         .route("/api/health", get(handlers::health))
         .route("/api/login", post(handlers::login))
+        .merge(protected)
         .with_state(state)
 }
 
@@ -155,5 +167,98 @@ mod tests {
         // Different IP is unaffected.
         let res = login(app, r#"{"password":"testpass"}"#, Some("10.9.9.9")).await;
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    async fn obtain_token(app: &axum::Router) -> String {
+        let res = login(app.clone(), r#"{"password":"testpass"}"#, None).await;
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        v["token"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn terminal_without_token_redirects_to_login() {
+        let (app, _dir) = test_app();
+        let res = app
+            .oneshot(Request::get("/terminal").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER); // axum Redirect::to = 303
+        assert_eq!(res.headers().get(header::LOCATION).unwrap(), "/");
+    }
+
+    #[tokio::test]
+    async fn api_without_token_gets_401_json() {
+        let (app, _dir) = test_app();
+        let res = app
+            .oneshot(Request::get("/api/sessions").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!({"error": "unauthorized"}));
+    }
+
+    #[tokio::test]
+    async fn header_token_grants_access() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let res = app
+            .oneshot(
+                Request::get("/terminal")
+                    .header("X-Session-Token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn query_token_grants_access() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let res = app
+            .oneshot(
+                Request::get(format!("/terminal?token={token}").as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cookie_token_grants_access() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let res = app
+            .oneshot(
+                Request::get("/terminal")
+                    .header(header::COOKIE, format!("ai_conductor_session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn garbage_token_is_rejected() {
+        let (app, _dir) = test_app();
+        let res = app
+            .oneshot(
+                Request::get("/terminal")
+                    .header("X-Session-Token", "deadbeef")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
     }
 }

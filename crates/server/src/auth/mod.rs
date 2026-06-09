@@ -1,3 +1,4 @@
+pub mod middleware;
 pub mod ratelimit;
 
 use bcrypt::{hash, verify};
