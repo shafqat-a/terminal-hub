@@ -11,6 +11,8 @@ pub struct Config {
     pub login_max_attempts: u32,
     pub login_window: Duration,
     pub login_lockout: Duration,
+    /// Shell to run inside new tmux sessions.
+    pub shell: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +74,9 @@ impl Config {
                 "AI_CONDUCTOR_LOGIN_LOCKOUT",
                 Duration::from_secs(60),
             )?,
+            shell: lookup("AI_CONDUCTOR_SHELL")
+                .or_else(|| lookup("SHELL"))
+                .unwrap_or_else(|| "/bin/bash".into()),
         })
     }
 }
@@ -98,6 +103,8 @@ mod tests {
         assert_eq!(cfg.login_window, std::time::Duration::from_secs(60));
         assert_eq!(cfg.login_lockout, std::time::Duration::from_secs(60));
         assert_eq!(cfg.pid_file, None);
+        // empty lookup: SHELL not set either, falls back to /bin/bash
+        assert_eq!(cfg.shell, "/bin/bash");
     }
 
     #[test]
@@ -118,6 +125,23 @@ mod tests {
         assert_eq!(cfg.session_timeout, std::time::Duration::from_secs(7200));
         assert_eq!(cfg.login_max_attempts, 0);
         assert_eq!(cfg.pid_file, Some(std::path::PathBuf::from("/tmp/c.pid")));
+    }
+
+    #[test]
+    fn shell_override_via_ai_conductor_shell() {
+        let lookup = |key: &str| -> Option<String> {
+            (key == "AI_CONDUCTOR_SHELL").then(|| "/usr/bin/zsh".into())
+        };
+        let cfg = Config::from_lookup(lookup).unwrap();
+        assert_eq!(cfg.shell, "/usr/bin/zsh");
+    }
+
+    #[test]
+    fn shell_falls_back_to_shell_env_var() {
+        let lookup =
+            |key: &str| -> Option<String> { (key == "SHELL").then(|| "/usr/bin/fish".into()) };
+        let cfg = Config::from_lookup(lookup).unwrap();
+        assert_eq!(cfg.shell, "/usr/bin/fish");
     }
 
     #[test]

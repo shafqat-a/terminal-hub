@@ -23,6 +23,7 @@ pub fn build_state(cfg: Config) -> SharedState {
     let db_path = cfg.data_dir.join("conductor.db");
     let store = store::Store::open(&db_path)
         .unwrap_or_else(|e| panic!("cannot open store at {}: {e}", db_path.display()));
+    tracing::debug!(shell = %cfg.shell, "session shell configured");
     Arc::new(AppState {
         cfg,
         auth,
