@@ -25,6 +25,7 @@ impl AuthService {
         }
     }
 
+    #[cfg(test)]
     pub fn verify_password(&self, candidate: &str) -> bool {
         verify(candidate, &self.password_hash).unwrap_or(false)
     }
