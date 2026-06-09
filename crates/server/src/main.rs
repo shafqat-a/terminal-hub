@@ -3,6 +3,7 @@ mod assets;
 mod auth;
 mod config;
 mod handlers;
+pub mod session;
 
 use std::net::SocketAddr;
 

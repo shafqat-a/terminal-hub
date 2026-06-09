@@ -18,9 +18,14 @@ tower = "0.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
 store = { path = "../store" }
+tmux = { path = "../tmux" }
 rust-embed = "8"
 mime_guess = "2"
+portable-pty = "0.8"
+uuid = { version = "1", features = ["v4"] }
+time = { version = "0.3", features = ["formatting", "local-offset"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
 tempfile = "3"
+tokio = { workspace = true }
