@@ -1,4 +1,5 @@
 mod app;
+mod assets;
 mod auth;
 mod config;
 mod handlers;

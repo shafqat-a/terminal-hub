@@ -18,6 +18,8 @@ tower = "0.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
 store = { path = "../store" }
+rust-embed = "8"
+mime_guess = "2"
 
 [dev-dependencies]
 http-body-util = "0.1"

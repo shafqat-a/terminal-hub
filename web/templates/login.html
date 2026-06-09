@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Dev Conductor - Login</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1b26;
+            color: #c0caf5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        .login-card {
+            background: #24283b;
+            border: 1px solid #414868;
+            border-radius: 12px;
+            padding: 40px;
+            width: 100%;
+            max-width: 380px;
+        }
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+            color: #7aa2f7;
+        }
+        .subtitle {
+            font-size: 0.875rem;
+            color: #565f89;
+            margin-bottom: 28px;
+        }
+        label {
+            display: block;
+            font-size: 0.875rem;
+            margin-bottom: 6px;
+            color: #a9b1d6;
+        }
+        input[type="password"] {
+            width: 100%;
+            padding: 10px 14px;
+            background: #1a1b26;
+            border: 1px solid #414868;
+            border-radius: 6px;
+            color: #c0caf5;
+            font-size: 1rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input[type="password"]:focus {
+            border-color: #7aa2f7;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 20px;
+            background: #7aa2f7;
+            color: #1a1b26;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background: #89b4fa; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .error {
+            margin-top: 14px;
+            padding: 10px;
+            background: #f7768e22;
+            border: 1px solid #f7768e44;
+            border-radius: 6px;
+            color: #f7768e;
+            font-size: 0.875rem;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <h1>AI Dev Conductor</h1>
+        <p class="subtitle">Enter password to continue</p>
+        <form id="loginForm">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" autofocus required>
+            <button type="submit" id="submitBtn">Sign In</button>
+        </form>
+        <div class="error" id="error"></div>
+    </div>
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            const errorEl = document.getElementById('error');
+            const password = document.getElementById('password').value;
+
+            btn.disabled = true;
+            errorEl.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password }),
+                });
+                if (res.ok) {
+                    window.location.href = '/terminal';
+                } else {
+                    const data = await res.json();
+                    errorEl.textContent = data.error || 'Authentication failed';
+                    errorEl.style.display = 'block';
+                }
+            } catch {
+                errorEl.textContent = 'Connection error';
+                errorEl.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

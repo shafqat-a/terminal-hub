@@ -44,6 +44,8 @@ pub fn build_app(state: SharedState) -> Router {
         ));
 
     Router::new()
+        .route("/", get(crate::assets::login_page))
+        .route("/static/*path", get(crate::assets::static_file))
         .route("/api/health", get(handlers::health))
         .route("/api/login", post(handlers::login))
         .merge(protected)
@@ -278,5 +280,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn root_serves_login_page() {
+        let (app, _dir) = test_app();
+        let res = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ct.starts_with("text/html"));
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(
+            html.contains("/api/login"),
+            "login page must reference the login API"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_css_is_served_with_mime() {
+        let (app, _dir) = test_app();
+        let res = app
+            .oneshot(
+                Request::get("/static/css/style.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ct.starts_with("text/css"));
+    }
+
+    #[tokio::test]
+    async fn unknown_static_path_is_404() {
+        let (app, _dir) = test_app();
+        let res = app
+            .oneshot(Request::get("/static/nope.js").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }
