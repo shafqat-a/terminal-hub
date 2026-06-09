@@ -60,7 +60,22 @@ impl RateLimiter {
             return;
         }
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+
+        const SWEEP_THRESHOLD: usize = 1024;
+        if entries.len() >= SWEEP_THRESHOLD {
+            Self::sweep(&mut entries, self.window, now);
+        }
+
         let entry = entries.entry(key.to_string()).or_default();
+
+        // Failures during an active lockout do not count -- prevents offence
+        // ratcheting if a caller records without checking allowed() first.
+        if let Some(until) = entry.locked_until {
+            if until > now {
+                return;
+            }
+        }
+
         entry
             .failures
             .retain(|t| now.duration_since(*t) < self.window);
@@ -81,6 +96,17 @@ impl RateLimiter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(key);
+    }
+
+    /// Drop entries with no recent failures and no active lockout. Called
+    /// opportunistically so the map cannot grow unboundedly under IP-rotation
+    /// attacks.
+    fn sweep(entries: &mut HashMap<String, Entry>, window: Duration, now: Instant) {
+        entries.retain(|_, e| {
+            let locked = e.locked_until.is_some_and(|until| until > now);
+            let recent = e.failures.iter().any(|t| now.duration_since(*t) < window);
+            locked || recent
+        });
     }
 }
 
@@ -133,7 +159,7 @@ mod tests {
         let t0 = Instant::now();
         rl.record_failure_at("ip1", t0);
         rl.record_failure_at("ip1", t0);
-        // Third failure arrives after the window has passed — no lockout.
+        // Third failure arrives after the window has passed -- no lockout.
         let later = t0 + WINDOW + Duration::from_secs(1);
         rl.record_failure_at("ip1", later);
         assert!(rl.allowed_at("ip1", later).0);
@@ -174,5 +200,40 @@ mod tests {
             rl.record_failure_at("ip1", t0);
         }
         assert!(rl.allowed_at("ip1", t0).0);
+    }
+
+    #[test]
+    fn stale_entries_are_swept_when_map_grows() {
+        let rl = limiter();
+        let t0 = Instant::now();
+        // 1024 distinct stale keys (single failure each, then window passes)
+        for i in 0..1024 {
+            rl.record_failure_at(&format!("ip-{i}"), t0);
+        }
+        let later = t0 + WINDOW + Duration::from_secs(1);
+        // Next failure triggers the sweep; stale entries vanish.
+        rl.record_failure_at("fresh", later);
+        assert!(rl.entries.lock().unwrap().len() <= 2);
+    }
+
+    #[test]
+    fn failures_during_lockout_do_not_ratchet_offences() {
+        let rl = limiter();
+        let t0 = Instant::now();
+        for _ in 0..3 {
+            rl.record_failure_at("ip1", t0);
+        }
+        assert!(!rl.allowed_at("ip1", t0).0); // locked, base lockout
+                                              // Hammering during the lockout must not escalate the offence level.
+        for _ in 0..10 {
+            rl.record_failure_at("ip1", t0);
+        }
+        let after_first = t0 + BASE + Duration::from_secs(1);
+        assert!(rl.allowed_at("ip1", after_first).0); // lockout over, not extended
+                                                      // Next lockout doubles exactly once (offence 1 -> 2x), proving no ratcheting happened.
+        for _ in 0..3 {
+            rl.record_failure_at("ip1", after_first);
+        }
+        assert_eq!(rl.allowed_at("ip1", after_first).1, BASE * 2);
     }
 }
