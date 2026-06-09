@@ -62,8 +62,16 @@ impl Config {
                 Duration::from_secs(24 * 3600),
             )?,
             login_max_attempts,
-            login_window: duration(&lookup, "AI_CONDUCTOR_LOGIN_WINDOW", Duration::from_secs(60))?,
-            login_lockout: duration(&lookup, "AI_CONDUCTOR_LOGIN_LOCKOUT", Duration::from_secs(60))?,
+            login_window: duration(
+                &lookup,
+                "AI_CONDUCTOR_LOGIN_WINDOW",
+                Duration::from_secs(60),
+            )?,
+            login_lockout: duration(
+                &lookup,
+                "AI_CONDUCTOR_LOGIN_LOCKOUT",
+                Duration::from_secs(60),
+            )?,
         })
     }
 }
@@ -82,7 +90,10 @@ mod tests {
         assert_eq!(cfg.password, "admin");
         assert_eq!(cfg.addr, "0.0.0.0:8080");
         assert_eq!(cfg.data_dir, std::path::PathBuf::from("./data/sessions"));
-        assert_eq!(cfg.session_timeout, std::time::Duration::from_secs(24 * 3600));
+        assert_eq!(
+            cfg.session_timeout,
+            std::time::Duration::from_secs(24 * 3600)
+        );
         assert_eq!(cfg.login_max_attempts, 5);
         assert_eq!(cfg.login_window, std::time::Duration::from_secs(60));
         assert_eq!(cfg.login_lockout, std::time::Duration::from_secs(60));
