@@ -13,3 +13,12 @@ thiserror = { workspace = true }
 bcrypt = "0.15"
 rand = "0.8"
 hex = "0.4"
+axum = "0.7"
+tower = "0.5"
+serde = { workspace = true }
+serde_json = { workspace = true }
+store = { path = "../store" }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
