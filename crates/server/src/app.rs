@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 
 use crate::auth::ratelimit::RateLimiter;
@@ -33,6 +33,7 @@ pub fn build_state(cfg: Config) -> SharedState {
 pub fn build_app(state: SharedState) -> Router {
     Router::new()
         .route("/api/health", get(handlers::health))
+        .route("/api/login", post(handlers::login))
         .with_state(state)
 }
 
@@ -72,5 +73,86 @@ mod tests {
         let body = res.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v, serde_json::json!({"status": "ok"}));
+    }
+
+    use axum::http::header;
+
+    async fn login(
+        app: axum::Router,
+        body: &str,
+        xff: Option<&str>,
+    ) -> axum::http::Response<axum::body::Body> {
+        let mut req = Request::post("/api/login").header(header::CONTENT_TYPE, "application/json");
+        if let Some(ip) = xff {
+            req = req.header("X-Forwarded-For", ip);
+        }
+        app.oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn login_success_returns_token_and_cookie() {
+        let (app, _dir) = test_app();
+        let res = login(app, r#"{"password":"testpass"}"#, None).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let cookie = res
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(cookie.starts_with("ai_conductor_session="));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Path=/"));
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["success"], true);
+        assert_eq!(v["token"].as_str().unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn login_wrong_password_is_401() {
+        let (app, _dir) = test_app();
+        let res = login(app, r#"{"password":"nope"}"#, None).await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!({"error": "invalid password"}));
+    }
+
+    #[tokio::test]
+    async fn login_malformed_json_is_400() {
+        let (app, _dir) = test_app();
+        let res = login(app, "{not json", None).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!({"error": "invalid request"}));
+    }
+
+    #[tokio::test]
+    async fn login_throttles_after_max_attempts_with_retry_after() {
+        let (app, _dir) = test_app(); // default max_attempts = 5
+        for _ in 0..5 {
+            let res = login(app.clone(), r#"{"password":"nope"}"#, Some("10.1.1.7")).await;
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        }
+        let res = login(app.clone(), r#"{"password":"testpass"}"#, Some("10.1.1.7")).await;
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry: u64 = res
+            .headers()
+            .get("Retry-After")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(retry >= 1);
+        // Different IP is unaffected.
+        let res = login(app, r#"{"password":"testpass"}"#, Some("10.9.9.9")).await;
+        assert_eq!(res.status(), StatusCode::OK);
     }
 }
