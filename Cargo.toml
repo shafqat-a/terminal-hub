@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/server", "crates/store"]
+members = ["crates/server", "crates/store", "crates/tmux"]
 
 [workspace.package]
 edition = "2021"
