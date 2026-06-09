@@ -15,6 +15,8 @@ dependencies = [
 name = "ai-dev-conductor"
 version = "0.1.0"
 dependencies = [
+ "humantime",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -47,6 +49,12 @@ dependencies = [
  "libc",
  "windows-sys",
 ]
+
+[[package]]
+name = "humantime"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
 name = "lazy_static"

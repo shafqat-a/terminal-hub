@@ -8,3 +8,5 @@ license.workspace = true
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+humantime = "2"
+thiserror = { workspace = true }
