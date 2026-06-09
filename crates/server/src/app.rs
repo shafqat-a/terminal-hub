@@ -261,4 +261,22 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
     }
+
+    #[tokio::test]
+    async fn expired_token_is_rejected_by_middleware() {
+        let (app, dir) = test_app();
+        // Plant an already-expired session directly in the same DB file.
+        let db = store::Store::open(&dir.path().join("conductor.db")).unwrap();
+        db.add_auth_session("expiredtoken", 1).unwrap(); // expired long ago
+        let res = app
+            .oneshot(
+                Request::get("/terminal")
+                    .header("X-Session-Token", "expiredtoken")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    }
 }

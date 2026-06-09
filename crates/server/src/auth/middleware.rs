@@ -1,8 +1,6 @@
 //! Session-token gate. Token lookup order (Go parity):
 //! X-Session-Token header -> ?token= query param -> cookie.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
@@ -21,6 +19,9 @@ fn token_from_request(req: &Request) -> Option<String> {
             return Some(h.to_string());
         }
     }
+    // NOTE: query values are used raw, not percent-decoded. Tokens are 64
+    // lowercase hex chars (no reserved characters); revisit if the format
+    // ever changes.
     if let Some(query) = req.uri().query() {
         for pair in query.split("&") {
             if let Some(value) = pair.strip_prefix("token=") {
@@ -34,8 +35,9 @@ fn token_from_request(req: &Request) -> Option<String> {
         .headers()
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())?;
-    for cookie in cookies.split(";") {
-        if let Some(value) = cookie.trim().strip_prefix(&format!("{COOKIE_NAME}=")) {
+    let prefix = format!("{COOKIE_NAME}=");
+    for cookie in cookies.split(';') {
+        if let Some(value) = cookie.trim().strip_prefix(&prefix) {
             return Some(value.to_string());
         }
     }
@@ -48,10 +50,7 @@ fn is_api_request(req: &Request) -> bool {
 }
 
 pub async fn require_auth(State(state): State<SharedState>, req: Request, next: Next) -> Response {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock predates Unix epoch")
-        .as_secs() as i64;
+    let now = crate::handlers::unix_now();
     let valid = token_from_request(&req)
         .map(|t| state.store.validate_auth_session(&t, now).unwrap_or(false))
         .unwrap_or(false);
