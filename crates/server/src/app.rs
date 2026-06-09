@@ -304,6 +304,18 @@ mod tests {
             html.contains("/api/login"),
             "login page must reference the login API"
         );
+        assert!(
+            html.contains("/terminal"),
+            "login page must navigate to /terminal on success"
+        );
+        assert!(
+            !html.contains("{{"),
+            "no Go template directives may survive the port"
+        );
+        assert!(
+            !html.contains("BASE_PATH"),
+            "no dangling BASE_PATH references"
+        );
     }
 
     #[tokio::test]
