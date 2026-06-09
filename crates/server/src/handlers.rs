@@ -1,10 +1,3 @@
-use axum::Json;
-use serde_json::{json, Value};
-
-pub async fn health() -> Json<Value> {
-    Json(json!({"status": "ok"}))
-}
-
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,11 +5,22 @@ use axum::body::Bytes;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::{json, Value};
 
 use crate::app::SharedState;
 use crate::auth;
 
+pub async fn health() -> Json<Value> {
+    Json(json!({"status": "ok"}))
+}
+
 /// Go parity: first X-Forwarded-For element, else peer address host.
+///
+/// SECURITY: X-Forwarded-For is client-controlled. Rate limiting keyed on it
+/// assumes deployment behind a trusted reverse proxy that overwrites the
+/// header. Exposed directly, an attacker can rotate XFF values to evade
+/// per-IP throttling (same posture as the Go implementation).
 pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
         let first = xff.split(",").next().unwrap_or("").trim();
@@ -34,7 +38,7 @@ fn json_error(status: StatusCode, message: &str) -> Response {
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock predates Unix epoch")
         .as_secs() as i64
 }
 
@@ -67,7 +71,7 @@ pub async fn login(
         return json_error(StatusCode::BAD_REQUEST, "invalid request");
     };
 
-    if !state.auth.verify_password(&req.password) {
+    if !state.auth.verify_password_async(&req.password).await {
         state.limiter.record_failure(&ip);
         tracing::warn!("auth: failed login attempt, ip={ip}");
         return json_error(StatusCode::UNAUTHORIZED, "invalid password");
@@ -77,7 +81,8 @@ pub async fn login(
 
     let token = auth::generate_session_token();
     let expires_at = unix_now() + state.cfg.session_timeout.as_secs() as i64;
-    if state.store.add_auth_session(&token, expires_at).is_err() {
+    if let Err(e) = state.store.add_auth_session(&token, expires_at) {
+        tracing::error!("store: failed to persist auth session: {e}");
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
     }
 

@@ -21,7 +21,8 @@ pub fn build_state(cfg: Config) -> SharedState {
     let auth = AuthService::new(&cfg.password);
     let limiter = RateLimiter::new(cfg.login_max_attempts, cfg.login_window, cfg.login_lockout);
     let db_path = cfg.data_dir.join("conductor.db");
-    let store = store::Store::open(&db_path).expect("cannot open store");
+    let store = store::Store::open(&db_path)
+        .unwrap_or_else(|e| panic!("cannot open store at {}: {e}", db_path.display()));
     Arc::new(AppState {
         cfg,
         auth,

@@ -27,6 +27,16 @@ impl AuthService {
     pub fn verify_password(&self, candidate: &str) -> bool {
         verify(candidate, &self.password_hash).unwrap_or(false)
     }
+
+    /// Async wrapper: bcrypt verify takes ~100ms at cost 10 — offload to the
+    /// blocking pool so login storms can't starve the async runtime.
+    pub async fn verify_password_async(&self, candidate: &str) -> bool {
+        let hash = self.password_hash.clone();
+        let candidate = candidate.to_string();
+        tokio::task::spawn_blocking(move || verify(&candidate, &hash).unwrap_or(false))
+            .await
+            .unwrap_or(false)
+    }
 }
 
 /// 32 random bytes, lowercase hex -- identical to Go GenerateSessionToken.
