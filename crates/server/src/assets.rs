@@ -1,9 +1,14 @@
 //! Embedded web assets (templates + static files), compiled into the binary.
 
-use axum::extract::Path;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
+
+use crate::app::SharedState;
 
 #[derive(RustEmbed)]
 #[folder = "../../web"]
@@ -23,42 +28,72 @@ fn serve(path: &str) -> Response {
     }
 }
 
+/// Cache key: (asset path, base_path the bytes were substituted with).
+type SubstitutedKey = (String, String);
+
+/// Cache of `__BASE_PATH__`-substituted asset bytes. base_path is fixed for
+/// the lifetime of a production process, but tests build several apps with
+/// different base_paths inside one test binary, so the key carries both the
+/// asset path and the base_path it was substituted with.
+static SUBSTITUTED: OnceLock<Mutex<HashMap<SubstitutedKey, Vec<u8>>>> = OnceLock::new();
+
 /// Serve an embedded file with `__BASE_PATH__` placeholder replaced by
-/// `base_path` at serve time.
-///
-/// No cache is used: files are small (a few KB) and substitution is trivial.
-/// Caching would require a `OnceLock<Mutex<HashMap<...>>>` keyed on
-/// `(path, base_path)` — that complexity is deferred to U4 when we actually
-/// have a non-empty base_path in production; for U2/U3 base_path is always ""
-/// so the output bytes are identical to a direct `serve()` call.
+/// `base_path` at serve time. Substituted bytes are cached per
+/// (path, base_path); files are a few KB so the clone per request is cheap.
 pub fn serve_substituted(path: &str, base_path: &str, status: StatusCode) -> Response {
-    match WebAssets::get(path) {
-        Some(file) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let cache = SUBSTITUTED.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (path.to_string(), base_path.to_string());
+    let cached = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .cloned();
+    let bytes = match cached {
+        Some(bytes) => bytes,
+        None => {
+            let Some(file) = WebAssets::get(path) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
             let raw: Vec<u8> = match std::str::from_utf8(&file.data) {
                 Ok(s) => s.replace("__BASE_PATH__", base_path).into_bytes(),
                 // Non-UTF8 binary asset — return unchanged (no placeholders possible).
                 Err(_) => file.data.into_owned(),
             };
-            (
-                status,
-                [(header::CONTENT_TYPE, mime.as_ref().to_string())],
-                raw,
-            )
-                .into_response()
+            cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, raw.clone());
+            raw
         }
-        None => StatusCode::NOT_FOUND.into_response(),
+    };
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    (
+        status,
+        [(header::CONTENT_TYPE, mime.as_ref().to_string())],
+        bytes,
+    )
+        .into_response()
+}
+
+pub async fn login_page(State(state): State<SharedState>) -> Response {
+    serve_substituted("templates/login.html", &state.cfg.base_path, StatusCode::OK)
+}
+
+pub async fn terminal_page(State(state): State<SharedState>) -> Response {
+    serve_substituted(
+        "templates/terminal.html",
+        &state.cfg.base_path,
+        StatusCode::OK,
+    )
+}
+
+pub async fn static_file(State(state): State<SharedState>, Path(rest): Path<String>) -> Response {
+    let path = format!("static/{rest}");
+    // Only text assets that can carry `__BASE_PATH__` placeholders go through
+    // substitution; everything else (css, images, ...) is served verbatim.
+    if path.ends_with(".js") || path.ends_with(".html") {
+        serve_substituted(&path, &state.cfg.base_path, StatusCode::OK)
+    } else {
+        serve(&path)
     }
-}
-
-pub async fn login_page() -> Response {
-    serve("templates/login.html")
-}
-
-pub async fn terminal_page() -> Response {
-    serve("templates/terminal.html")
-}
-
-pub async fn static_file(Path(rest): Path<String>) -> Response {
-    serve(&format!("static/{rest}"))
 }

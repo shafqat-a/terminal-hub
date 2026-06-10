@@ -246,11 +246,24 @@ mod tests {
     /// Spawn a real TCP server for integration tests.
     /// Returns (addr, state, tempdir_guard).
     async fn spawn_server() -> (SocketAddr, SharedState, tempfile::TempDir) {
+        spawn_server_with(|_| None).await
+    }
+
+    /// Like [`spawn_server`] but with additional config overrides layered on
+    /// top of the defaults (mirrors `test_app_with`).
+    async fn spawn_server_with(
+        extra: impl Fn(&str) -> Option<String> + 'static,
+    ) -> (SocketAddr, SharedState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::from_lookup(|key| match key {
-            "AI_CONDUCTOR_DATA_DIR" => Some(dir.path().display().to_string()),
-            "AI_CONDUCTOR_PASSWORD" => Some("testpass".into()),
-            _ => None,
+        let cfg = Config::from_lookup(|key| {
+            if let Some(v) = extra(key) {
+                return Some(v);
+            }
+            match key {
+                "AI_CONDUCTOR_DATA_DIR" => Some(dir.path().display().to_string()),
+                "AI_CONDUCTOR_PASSWORD" => Some("testpass".into()),
+                _ => None,
+            }
         })
         .unwrap();
         let state = build_state(cfg).await;
@@ -683,5 +696,58 @@ mod tests {
             }
             other => panic!("expected HTTP 404, got: {other:?}"),
         }
+    }
+
+    // ---- U4: base-path WebSocket test --------------------------------------
+
+    /// WS round-trip through the "/app" mount: connect to /app/ws/<id>?token=,
+    /// receive the snapshot frame, send input, and observe its output.
+    #[tokio::test]
+    async fn ws_round_trip_under_base_path() {
+        let (addr, state, _dir) =
+            spawn_server_with(|key| (key == "AI_CONDUCTOR_BASE_PATH").then(|| "/app".into())).await;
+
+        let sess = state.manager.create(None).await.expect("create session");
+        let id = sess.id.clone();
+
+        let expires = crate::handlers::unix_now() + 3600;
+        state
+            .store
+            .add_auth_session("wsbasetoken", expires)
+            .unwrap();
+
+        let url = format!("ws://{addr}/app/ws/{id}?token=wsbasetoken");
+        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("WS connect under /app");
+        let (mut sink, mut stream) = ws.split();
+
+        // First frame must be the snapshot (type=="output").
+        let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("timeout waiting for snapshot")
+            .expect("stream ended")
+            .expect("ws error");
+        if let TungsteniteMessage::Text(t) = first {
+            let v: serde_json::Value = serde_json::from_str(&t).expect("first frame JSON");
+            assert_eq!(
+                v["type"].as_str().unwrap(),
+                "output",
+                "first frame must be type=output, got: {v}"
+            );
+        } else {
+            panic!("first frame was not Text: {first:?}");
+        }
+
+        // Input round-trip.
+        let input = serde_json::json!({"type": "input", "data": "echo BASEPATH_WS\n"}).to_string();
+        sink.send(TungsteniteMessage::Text(input))
+            .await
+            .expect("send input");
+        let found = wait_for_output(&mut stream, "BASEPATH_WS", Duration::from_secs(10)).await;
+        assert!(found, "expected BASEPATH_WS in output frames within 10s");
+
+        sink.send(TungsteniteMessage::Close(None)).await.ok();
+        state.manager.delete(&id).await.ok();
     }
 }

@@ -108,7 +108,7 @@ pub async fn mint_share(
         );
     }
 
-    let path = format!("/s/{raw_token}");
+    let path = format!("{}/s/{raw_token}", state.cfg.base_path);
     let url = if state.cfg.public_url.is_empty() {
         path.clone()
     } else {
@@ -198,11 +198,15 @@ pub async fn share_page(State(state): State<SharedState>, Path(token): Path<Stri
         .unwrap_or(None)
         .is_some()
     {
-        crate::assets::serve_substituted("templates/share.html", "", axum::http::StatusCode::OK)
+        crate::assets::serve_substituted(
+            "templates/share.html",
+            &state.cfg.base_path,
+            axum::http::StatusCode::OK,
+        )
     } else {
         crate::assets::serve_substituted(
             "templates/share_invalid.html",
-            "",
+            &state.cfg.base_path,
             axum::http::StatusCode::NOT_FOUND,
         )
     }

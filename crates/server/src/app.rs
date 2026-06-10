@@ -64,6 +64,7 @@ pub async fn build_state(cfg: Config) -> SharedState {
 }
 
 pub fn build_app(state: SharedState) -> Router {
+    let base_path = state.cfg.base_path.clone();
     let protected = Router::new()
         .route("/terminal", get(crate::assets::terminal_page))
         .route(
@@ -92,7 +93,7 @@ pub fn build_app(state: SharedState) -> Router {
             crate::auth::middleware::require_auth,
         ));
 
-    Router::new()
+    let app = Router::new()
         .route("/", get(crate::assets::login_page))
         .route("/static/*path", get(crate::assets::static_file))
         .route("/api/health", get(handlers::health))
@@ -101,7 +102,33 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/s/:token", get(shares::share_page))
         .route("/ws/share/:token", get(crate::ws::ws_share))
         .merge(protected)
-        .with_state(state)
+        .with_state(state);
+
+    if base_path.is_empty() {
+        return app;
+    }
+
+    // Mount the entire app under the base path (Go parity: r.Route(BasePath, ...)).
+    // Nesting at "{base_path}/" maps the inner "/" route to "{base_path}/"
+    // exactly; the bare prefix gets an explicit 301 to the login page (Go
+    // parity: http.StatusMovedPermanently — axum's Redirect::permanent is 308,
+    // so the response is built by hand), and anything outside the prefix
+    // falls through to the default 404.
+    let target = format!("{base_path}/");
+    let redirect_target = target.clone();
+    Router::new()
+        .route(
+            &base_path,
+            get(move || {
+                let target = redirect_target.clone();
+                async move {
+                    use axum::http::{header, StatusCode};
+                    use axum::response::IntoResponse;
+                    (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, target)]).into_response()
+                }
+            }),
+        )
+        .nest(&target, app)
 }
 
 #[cfg(test)]
@@ -381,8 +408,12 @@ mod tests {
             "no Go template directives may survive the port"
         );
         assert!(
-            !html.contains("BASE_PATH"),
-            "no dangling BASE_PATH references"
+            !html.contains("__BASE_PATH__"),
+            "no unsubstituted __BASE_PATH__ placeholders"
+        );
+        assert!(
+            html.contains(r#"window.BASE_PATH = "";"#),
+            "base_path must substitute to empty string at root"
         );
     }
 
@@ -680,8 +711,12 @@ mod tests {
             "no Go template directives may survive the port"
         );
         assert!(
-            !html.contains("BASE_PATH"),
-            "no dangling BASE_PATH references"
+            !html.contains("__BASE_PATH__"),
+            "no unsubstituted __BASE_PATH__ placeholders"
+        );
+        assert!(
+            html.contains(r#"window.BASE_PATH = "";"#),
+            "base_path must substitute to empty string at root"
         );
     }
 
@@ -1370,5 +1405,173 @@ mod tests {
             serde_json::json!({"error": "session not running"}),
             "404 body must be wire-exact (Go: 'session not running')"
         );
+    }
+
+    // ---- U4: base-path mounting tests -----------------------------------------
+
+    /// App mounted under "/app".
+    async fn test_app_based() -> (axum::Router, tempfile::TempDir) {
+        test_app_with(|key| (key == "AI_CONDUCTOR_BASE_PATH").then(|| "/app".into())).await
+    }
+
+    /// Login under the "/app" prefix and return the session token.
+    async fn obtain_token_based(app: &axum::Router) -> String {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::post("/app/api/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"password":"testpass"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "login under /app must be 200");
+        let v = body_json(res).await;
+        v["token"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn base_path_health_under_prefix_only() {
+        let (app, _dir) = test_app_based().await;
+
+        let res = app
+            .clone()
+            .oneshot(Request::get("/app/api/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "/app/api/health must be 200");
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"status": "ok"}));
+
+        let res = app
+            .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "requests outside the prefix must 404 (Go parity)"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_path_cookie_scoped_to_prefix() {
+        let (app, _dir) = test_app_based().await;
+        let res = app
+            .oneshot(
+                Request::post("/app/api/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"password":"testpass"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cookie = res
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            cookie.contains("Path=/app/"),
+            "session cookie must be scoped to Path=/app/, got: {cookie}"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_path_terminal_html_substituted() {
+        let (app, _dir) = test_app_based().await;
+        let token = obtain_token_based(&app).await;
+        let res = app
+            .oneshot(
+                Request::get("/app/terminal")
+                    .header("X-Session-Token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(
+            html.contains(r#"window.BASE_PATH = "/app""#),
+            "terminal HTML must carry the substituted base path"
+        );
+        assert!(
+            !html.contains("__BASE_PATH__"),
+            "terminal HTML must have zero literal __BASE_PATH__ placeholders"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_path_unauth_terminal_redirects_under_prefix() {
+        let (app, _dir) = test_app_based().await;
+        let res = app
+            .oneshot(Request::get("/app/terminal").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            res.headers().get(header::LOCATION).unwrap(),
+            "/app/",
+            "unauthenticated browser redirect must target the prefixed login page"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_path_bare_prefix_301_to_slash() {
+        let (app, _dir) = test_app_based().await;
+        let res = app
+            .oneshot(Request::get("/app").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::MOVED_PERMANENTLY,
+            "GET /app must 301 (Go parity)"
+        );
+        assert_eq!(res.headers().get(header::LOCATION).unwrap(), "/app/");
+    }
+
+    #[tokio::test]
+    async fn base_path_share_mint_path_prefixed() {
+        let (app, _dir) = test_app_based().await;
+        let token = obtain_token_based(&app).await;
+
+        let create = authed_request(&app, &token, "POST", "/app/api/sessions", None).await;
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let created = body_json(create).await;
+        let sess_id = created["id"].as_str().unwrap().to_string();
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/app/api/sessions/{sess_id}/share"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v = body_json(res).await;
+        let path = v["path"].as_str().unwrap();
+        assert!(
+            path.starts_with("/app/s/"),
+            "share mint path must start with /app/s/, got: {path}"
+        );
+        let url = v["url"].as_str().unwrap();
+        assert_eq!(url, path, "url must equal path when public_url is empty");
+
+        authed_request(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/app/api/sessions/{sess_id}"),
+            None,
+        )
+        .await;
     }
 }

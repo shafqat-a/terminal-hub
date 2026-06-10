@@ -46,6 +46,10 @@ fn token_from_request(req: &Request) -> Option<String> {
 }
 
 fn is_api_request(req: &Request) -> bool {
+    // Go parity: isAPIRequest strips the base path before checking. Here the
+    // app is mounted with Router::nest, whose StripPrefix layer runs before
+    // this middleware — req.uri() already has the base path removed, so the
+    // check is performed on the prefix-free path directly.
     let path = req.uri().path();
     path.starts_with("/api") || path.starts_with("/ws")
 }
@@ -75,7 +79,9 @@ pub async fn require_auth(State(state): State<SharedState>, req: Request, next: 
             )
                 .into_response()
         } else {
-            Redirect::to("/").into_response()
+            // Unauthenticated browser request: land on the login page, which
+            // lives under the base path when the app is mounted on a prefix.
+            Redirect::to(&format!("{}/", state.cfg.base_path)).into_response()
         };
     }
     next.run(req).await

@@ -86,10 +86,13 @@ pub async fn login(
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
     }
 
+    // Cookie path is base_path + "/" so the cookie is scoped to the mount
+    // point when the app is served under a reverse-proxy subpath (Go parity).
     let cookie = format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+        "{}={}; Path={}/; HttpOnly; SameSite=Strict; Max-Age={}",
         auth::COOKIE_NAME,
         token,
+        state.cfg.base_path,
         state.cfg.session_timeout.as_secs()
     );
     (

@@ -23,6 +23,21 @@ pub struct Config {
     pub share_ttl: Duration,
     /// Public URL prefix for share links (AI_CONDUCTOR_PUBLIC_URL, default "").
     pub public_url: String,
+    /// URL path prefix the app is mounted under (AI_CONDUCTOR_BASE_PATH).
+    /// Normalized to "" (root) or "/prefix" — leading slash, no trailing slash.
+    pub base_path: String,
+}
+
+/// Normalize a configured base path into "" (root) or "/prefix" with a
+/// leading slash and no trailing slash. Nested prefixes are preserved
+/// (Go parity: `normalizeBasePath`).
+fn normalize_base_path(raw: &str) -> String {
+    let p = raw.trim().trim_matches('/');
+    if p.is_empty() {
+        String::new()
+    } else {
+        format!("/{p}")
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +119,7 @@ impl Config {
                 Duration::from_secs(24 * 3600),
             )?,
             public_url: lookup("AI_CONDUCTOR_PUBLIC_URL").unwrap_or_default(),
+            base_path: normalize_base_path(&lookup("AI_CONDUCTOR_BASE_PATH").unwrap_or_default()),
         })
     }
 }
@@ -150,6 +166,7 @@ mod tests {
             cfg.public_url, "",
             "public_url must default to empty string"
         );
+        assert_eq!(cfg.base_path, "", "base_path must default to empty string");
     }
 
     #[test]
@@ -242,6 +259,33 @@ mod tests {
             (key == "AI_CONDUCTOR_SHARE_TTL").then(|| "notaduration".to_string())
         };
         assert!(Config::from_lookup(lookup).is_err());
+    }
+
+    #[test]
+    fn base_path_is_normalized() {
+        // (input, expected) — Go parity: TestNormalizeBasePath.
+        let cases = [
+            ("", ""),
+            ("/", ""),
+            ("  ", ""),
+            ("terminaltest", "/terminaltest"),
+            ("/terminaltest", "/terminaltest"),
+            ("/terminaltest/", "/terminaltest"),
+            ("  /terminaltest/ ", "/terminaltest"),
+            ("  /app/ ", "/app"),
+            ("a/b", "/a/b"),
+            ("/a/b/", "/a/b"),
+        ];
+        for (input, expected) in cases {
+            let lookup = |key: &str| -> Option<String> {
+                (key == "AI_CONDUCTOR_BASE_PATH").then(|| input.to_string())
+            };
+            let cfg = Config::from_lookup(lookup).unwrap();
+            assert_eq!(
+                cfg.base_path, expected,
+                "normalize_base_path({input:?}) must be {expected:?}"
+            );
+        }
     }
 
     #[test]
