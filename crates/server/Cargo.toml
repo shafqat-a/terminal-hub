@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 bcrypt = "0.15"
 rand = "0.8"
 hex = "0.4"
+sha2 = "0.10"
 subtle = "2"
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"

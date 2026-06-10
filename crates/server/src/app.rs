@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 
 use crate::auth::ratelimit::RateLimiter;
@@ -9,6 +9,7 @@ use crate::auth::AuthService;
 use crate::config::Config;
 use crate::handlers;
 use crate::session;
+use crate::shares;
 
 pub struct AppState {
     pub cfg: Config,
@@ -81,6 +82,10 @@ pub fn build_app(state: SharedState) -> Router {
             "/api/sessions/:id/history",
             get(crate::exec_history::sessions_history),
         )
+        // Share link routes (M4-U1)
+        .route("/api/sessions/:id/share", post(shares::mint_share))
+        .route("/api/sessions/:id/shares", get(shares::list_shares))
+        .route("/api/shares/:id", delete(shares::revoke_share))
         .route("/ws/:id", get(crate::ws::ws_session))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -1065,6 +1070,302 @@ mod tests {
             v,
             serde_json::json!({"error": "session not found"}),
             "404 body must be wire-exact"
+        );
+    }
+    // ---- U1: Share link integration tests -----------------------------------
+
+    /// Helper: create a session and return its id.
+    async fn create_session(app: &axum::Router, token: &str) -> String {
+        let res = authed_request(app, token, "POST", "/api/sessions", None).await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v = body_json(res).await;
+        v["id"].as_str().unwrap().to_string()
+    }
+
+    /// Helper: delete a session (best-effort cleanup).
+    async fn delete_session(app: &axum::Router, token: &str, id: &str) {
+        authed_request(app, token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    #[tokio::test]
+    async fn mint_share_201_shape() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{sess_id}/share"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CREATED, "mint must return 201");
+        let v = body_json(res).await;
+
+        let id = v["id"].as_str().expect("id field");
+        assert_eq!(id.len(), 16, "share id must be 16 hex chars");
+
+        let share_token = v["token"].as_str().expect("token field");
+        assert_eq!(share_token.len(), 64, "token must be 64 hex chars");
+
+        assert_eq!(v["mode"].as_str().unwrap(), "read");
+        assert_eq!(v["sessionId"].as_str().unwrap(), sess_id);
+
+        let path = v["path"].as_str().expect("path field");
+        assert_eq!(
+            path,
+            &format!("/s/{share_token}"),
+            "path must be /s/<token>"
+        );
+
+        let url = v["url"].as_str().expect("url field");
+        assert_eq!(url, path, "url must equal path when public_url is empty");
+
+        assert!(v["expiresAt"].is_number(), "expiresAt must be a number");
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    #[tokio::test]
+    async fn mint_share_with_public_url() {
+        let (app, _dir) = test_app_with(|k| {
+            (k == "AI_CONDUCTOR_PUBLIC_URL").then(|| "https://example.com".into())
+        })
+        .await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{sess_id}/share"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v = body_json(res).await;
+
+        let path = v["path"].as_str().unwrap();
+        let url = v["url"].as_str().unwrap();
+        assert_eq!(
+            url,
+            &format!("https://example.com{path}"),
+            "url must prepend public_url"
+        );
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    #[tokio::test]
+    async fn mint_share_ttl_honored() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+
+        let body = r#"{"ttlSeconds":3600}"#;
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{sess_id}/share"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v = body_json(res).await;
+
+        let expires_at = v["expiresAt"].as_i64().unwrap();
+        let expected = before + 3600;
+        assert!(
+            (expected..=expected + 5).contains(&expires_at),
+            "expiresAt must be ~now+3600, got {expires_at}, expected ~{expected}"
+        );
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    #[tokio::test]
+    async fn mint_share_ttl_capped_at_30d() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+
+        let body = r#"{"ttlSeconds":8640000}"#;
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{sess_id}/share"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v = body_json(res).await;
+
+        let expires_at = v["expiresAt"].as_i64().unwrap();
+        let max_30d = before + 30 * 24 * 3600;
+        assert!(
+            expires_at <= max_30d + 5,
+            "expiresAt must be capped at 30d, got {expires_at}, max ~{max_30d}"
+        );
+        assert!(
+            expires_at >= max_30d - 5,
+            "expiresAt must be ~30d when capped, got {expires_at}"
+        );
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    #[tokio::test]
+    async fn list_shares_ordered_desc_no_token() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+
+        authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{sess_id}/share"),
+            None,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{sess_id}/share"),
+            None,
+        )
+        .await;
+
+        let list_res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{sess_id}/shares"),
+            None,
+        )
+        .await;
+        assert_eq!(list_res.status(), StatusCode::OK);
+        let arr = body_json(list_res).await;
+        let arr = arr.as_array().expect("must be array");
+        assert_eq!(arr.len(), 2, "must have 2 shares");
+
+        let ca0 = arr[0]["createdAt"].as_i64().unwrap();
+        let ca1 = arr[1]["createdAt"].as_i64().unwrap();
+        assert!(ca0 >= ca1, "list must be DESC by createdAt: {ca0} >= {ca1}");
+
+        let obj = arr[0].as_object().unwrap();
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(|s| s.as_str()).collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "id",
+            "sessionId",
+            "mode",
+            "createdAt",
+            "expiresAt",
+            "revoked",
+        ]
+        .iter()
+        .cloned()
+        .collect();
+        assert_eq!(
+            keys, expected,
+            "list fields must be exactly {{id,sessionId,mode,createdAt,expiresAt,revoked}}"
+        );
+        assert!(!obj.contains_key("token"), "token must NOT appear in list");
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    #[tokio::test]
+    async fn revoke_then_store_redeem_none() {
+        let (app, dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+
+        let mint_res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{sess_id}/share"),
+            None,
+        )
+        .await;
+        assert_eq!(mint_res.status(), StatusCode::CREATED);
+        let mint_v = body_json(mint_res).await;
+        let share_id = mint_v["id"].as_str().unwrap().to_string();
+        let raw_token = mint_v["token"].as_str().unwrap().to_string();
+
+        let revoke_res = authed_request(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/api/shares/{share_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(revoke_res.status(), StatusCode::OK);
+        let rv = body_json(revoke_res).await;
+        assert_eq!(rv, serde_json::json!({"success": true}));
+
+        let db = store::Store::open(&dir.path().join("conductor.db")).unwrap();
+        let hash: Vec<u8> = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(raw_token.as_bytes()).to_vec()
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let result = db.redeem_share(&hash, now).unwrap();
+        assert!(result.is_none(), "revoked share must not be redeemable");
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    #[tokio::test]
+    async fn revoke_unknown_share_id_returns_200() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        let res =
+            authed_request(&app, &token, "DELETE", "/api/shares/doesnotexist1234", None).await;
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "revoke of unknown id must be 200 (Go parity: rows_affected not checked)"
+        );
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"success": true}));
+    }
+
+    #[tokio::test]
+    async fn mint_for_unknown_session_is_404() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        let res = authed_request(&app, &token, "POST", "/api/sessions/zzzzzzzz/share", None).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v = body_json(res).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"error": "session not running"}),
+            "404 body must be wire-exact (Go: 'session not running')"
         );
     }
 }

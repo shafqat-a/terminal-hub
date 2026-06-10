@@ -5,6 +5,7 @@ mod config;
 mod exec_history;
 mod handlers;
 pub mod session;
+mod shares;
 mod ws;
 
 use std::net::SocketAddr;

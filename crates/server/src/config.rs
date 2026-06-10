@@ -19,6 +19,10 @@ pub struct Config {
     pub idle_timeout: Duration,
     /// Maximum concurrent live sessions. 0 means unlimited.
     pub max_sessions: u32,
+    /// Default TTL for share links (AI_CONDUCTOR_SHARE_TTL, humantime, default 24h).
+    pub share_ttl: Duration,
+    /// Public URL prefix for share links (AI_CONDUCTOR_PUBLIC_URL, default "").
+    pub public_url: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -94,6 +98,12 @@ impl Config {
             api_key: lookup("AI_CONDUCTOR_API_KEY"),
             idle_timeout: duration(&lookup, "AI_CONDUCTOR_IDLE_TIMEOUT", Duration::ZERO)?,
             max_sessions,
+            share_ttl: duration(
+                &lookup,
+                "AI_CONDUCTOR_SHARE_TTL",
+                Duration::from_secs(24 * 3600),
+            )?,
+            public_url: lookup("AI_CONDUCTOR_PUBLIC_URL").unwrap_or_default(),
         })
     }
 }
@@ -120,9 +130,7 @@ mod tests {
         assert_eq!(cfg.login_window, std::time::Duration::from_secs(60));
         assert_eq!(cfg.login_lockout, std::time::Duration::from_secs(60));
         assert_eq!(cfg.pid_file, None);
-        // empty lookup: SHELL not set either, falls back to /bin/bash
         assert_eq!(cfg.shell, "/bin/bash");
-        // new fields: defaults
         assert_eq!(cfg.api_key, None, "api_key should default to None");
         assert_eq!(
             cfg.idle_timeout,
@@ -132,6 +140,15 @@ mod tests {
         assert_eq!(
             cfg.max_sessions, 0,
             "max_sessions should default to 0 (unlimited)"
+        );
+        assert_eq!(
+            cfg.share_ttl,
+            std::time::Duration::from_secs(24 * 3600),
+            "share_ttl must default to 24h"
+        );
+        assert_eq!(
+            cfg.public_url, "",
+            "public_url must default to empty string"
         );
     }
 
@@ -204,5 +221,35 @@ mod tests {
             (key == "AI_CONDUCTOR_IDLE_TIMEOUT").then(|| "notaduration".to_string())
         };
         assert!(Config::from_lookup(lookup).is_err());
+    }
+
+    #[test]
+    fn share_ttl_override_parsed() {
+        let lookup = |key: &str| -> Option<String> {
+            (key == "AI_CONDUCTOR_SHARE_TTL").then(|| "12h".into())
+        };
+        let cfg = Config::from_lookup(lookup).unwrap();
+        assert_eq!(
+            cfg.share_ttl,
+            std::time::Duration::from_secs(12 * 3600),
+            "share_ttl must parse humantime"
+        );
+    }
+
+    #[test]
+    fn share_ttl_invalid_is_an_error() {
+        let lookup = |key: &str| -> Option<String> {
+            (key == "AI_CONDUCTOR_SHARE_TTL").then(|| "notaduration".to_string())
+        };
+        assert!(Config::from_lookup(lookup).is_err());
+    }
+
+    #[test]
+    fn public_url_override_parsed() {
+        let lookup = |key: &str| -> Option<String> {
+            (key == "AI_CONDUCTOR_PUBLIC_URL").then(|| "https://example.com".into())
+        };
+        let cfg = Config::from_lookup(lookup).unwrap();
+        assert_eq!(cfg.public_url, "https://example.com");
     }
 }
