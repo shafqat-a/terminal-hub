@@ -23,6 +23,8 @@ pub struct Config {
     pub share_ttl: Duration,
     /// Public URL prefix for share links (AI_CONDUCTOR_PUBLIC_URL, default "").
     pub public_url: String,
+    /// Upload size cap in bytes (AI_CONDUCTOR_MAX_UPLOAD_BYTES, default 100 MiB).
+    pub max_upload_bytes: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +59,14 @@ impl Config {
             None => 5,
             Some(raw) => raw.parse().map_err(|_| ConfigError {
                 key: "AI_CONDUCTOR_LOGIN_MAX_ATTEMPTS",
+                message: format!("not a number: {raw}"),
+            })?,
+        };
+
+        let max_upload_bytes = match lookup("AI_CONDUCTOR_MAX_UPLOAD_BYTES") {
+            None => 104_857_600, // 100 MiB, Go: envInt64(..., 100<<20)
+            Some(raw) => raw.parse().map_err(|_| ConfigError {
+                key: "AI_CONDUCTOR_MAX_UPLOAD_BYTES",
                 message: format!("not a number: {raw}"),
             })?,
         };
@@ -104,6 +114,7 @@ impl Config {
                 Duration::from_secs(24 * 3600),
             )?,
             public_url: lookup("AI_CONDUCTOR_PUBLIC_URL").unwrap_or_default(),
+            max_upload_bytes,
         })
     }
 }
@@ -149,6 +160,10 @@ mod tests {
         assert_eq!(
             cfg.public_url, "",
             "public_url must default to empty string"
+        );
+        assert_eq!(
+            cfg.max_upload_bytes, 104_857_600,
+            "max_upload_bytes must default to 100 MiB"
         );
     }
 
@@ -240,6 +255,23 @@ mod tests {
     fn share_ttl_invalid_is_an_error() {
         let lookup = |key: &str| -> Option<String> {
             (key == "AI_CONDUCTOR_SHARE_TTL").then(|| "notaduration".to_string())
+        };
+        assert!(Config::from_lookup(lookup).is_err());
+    }
+
+    #[test]
+    fn max_upload_bytes_override_parsed() {
+        let lookup = |key: &str| -> Option<String> {
+            (key == "AI_CONDUCTOR_MAX_UPLOAD_BYTES").then(|| "1024".into())
+        };
+        let cfg = Config::from_lookup(lookup).unwrap();
+        assert_eq!(cfg.max_upload_bytes, 1024);
+    }
+
+    #[test]
+    fn invalid_max_upload_bytes_is_an_error() {
+        let lookup = |key: &str| -> Option<String> {
+            (key == "AI_CONDUCTOR_MAX_UPLOAD_BYTES").then(|| "notanumber".to_string())
         };
         assert!(Config::from_lookup(lookup).is_err());
     }
