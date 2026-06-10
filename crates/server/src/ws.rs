@@ -1617,11 +1617,26 @@ mod tests {
             .expect("WS connect");
         let (mut sink, mut stream) = ws.split();
 
-        // Drain the snapshot frame; give the shell a moment to come up.
+        // Drain the snapshot frame, then prove the shell is up and echoing
+        // before pasting (a fixed sleep is too racy on loaded CI runners).
         tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
             .ok();
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        let probe =
+            serde_json::json!({"type": "input", "data": "echo PASTE_READ''Y\n"}).to_string();
+        sink.send(TungsteniteMessage::Text(probe))
+            .await
+            .expect("send readiness probe");
+        let ready = wait_for_output(&mut stream, "PASTE_READY", Duration::from_secs(10)).await;
+        assert!(ready, "shell must echo the readiness probe within 10s");
+
+        // Widen the pane so the typed absolute tempdir path cannot wrap at
+        // the 80-col boundary (a wrapped path breaks the contains() check).
+        let resize = serde_json::json!({"type": "resize", "cols": 200, "rows": 50}).to_string();
+        sink.send(TungsteniteMessage::Text(resize))
+            .await
+            .expect("send resize");
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
         let payload: &[u8] = b"\x89PNG\r\n\x1a\nws-paste-payload";
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload);
@@ -1661,7 +1676,7 @@ mod tests {
         // The absolute path was typed into the pty — visible via capture-pane.
         let needle = std::path::absolute(&path).unwrap().display().to_string();
         let tmux_name = tmux::session_name(&id);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut found = false;
         while std::time::Instant::now() < deadline {
             if let Ok(bytes) = tmux::capture_pane(dir.path(), &tmux_name, 50).await {
