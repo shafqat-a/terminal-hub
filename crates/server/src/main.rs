@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod handlers;
 pub mod session;
+mod ws;
 
 use std::net::SocketAddr;
 

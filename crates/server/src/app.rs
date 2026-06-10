@@ -49,6 +49,7 @@ pub fn build_app(state: SharedState) -> Router {
             "/api/sessions/:id",
             put(handlers::sessions_rename).delete(handlers::sessions_delete),
         )
+        .route("/ws/:id", get(crate::ws::ws_session))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::auth::middleware::require_auth,
