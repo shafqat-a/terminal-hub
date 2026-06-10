@@ -242,7 +242,9 @@ pub async fn download(
 
     // Stat before opening (Go: os.Stat err or IsDir → 404). Keeping the
     // metadata also supplies Content-Length for the streamed body, matching
-    // Go's http.ServeFile.
+    // Go's http.ServeFile. Known divergence: ServeFile also handles Range /
+    // If-Modified-Since and emits Last-Modified; this endpoint serves the
+    // whole file unconditionally (contract: bytes + disposition only).
     let meta = match tokio::fs::metadata(&full).await {
         Ok(m) if m.is_file() => m,
         _ => return json_error(StatusCode::NOT_FOUND, "file not found"),

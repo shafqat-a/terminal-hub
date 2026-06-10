@@ -121,15 +121,33 @@ async fn send_text(sink: &mut SplitSink<WebSocket, Message>, frame: String) -> b
     !matches!(send_result, Err(_) | Ok(Err(_)))
 }
 
-/// Repaint a client from scratch: capture-pane snapshot frame, then one frame
-/// re-asserting all active DEC private modes (spec §4.3). Used on attach and
-/// on lag-resync (§4.5). Returns false when the socket is dead.
+/// Repaint a client from scratch: one frame re-asserting all active DEC
+/// private modes (spec §4.3), then the capture-pane snapshot frame. Used on
+/// attach and on lag-resync (§4.5). Returns false when the socket is dead.
+///
+/// Order matters: re-assert MUST precede the snapshot. tmux asserts alt
+/// screen (?1049h) at attach, so the session scanner virtually always holds
+/// it active; sending it after the snapshot would switch xterm.js to a
+/// cleared alt buffer and wipe the snapshot just painted (blank screen until
+/// the pane next emits output). Clear-then-paint is safe; paint-then-clear
+/// is not.
 async fn send_resync(
     sink: &mut SplitSink<WebSocket, Message>,
     sess: &Session,
     data_dir: &std::path::Path,
     tmux_name: &str,
 ) -> bool {
+    // Mode re-assert frame: skipped entirely when no tracked mode is active.
+    let reassert = sess
+        .pty
+        .modes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reassert_sequence();
+    if !reassert.is_empty() && !send_text(sink, output_frame(&reassert)).await {
+        return false;
+    }
+
     match tmux::capture_pane(data_dir, tmux_name, 2000).await {
         Ok(bytes) => {
             // Replace all bare \n with \r\n (byte-level) using the shared
@@ -146,18 +164,7 @@ async fn send_resync(
             // Continue without snapshot.
         }
     }
-
-    // Mode re-assert frame: skipped entirely when no tracked mode is active.
-    let reassert = sess
-        .pty
-        .modes
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .reassert_sequence();
-    if reassert.is_empty() {
-        return true;
-    }
-    send_text(sink, output_frame(&reassert)).await
+    true
 }
 
 /// GET /ws/:id — WebSocket upgrade handler (auth-gated in the router).
@@ -281,7 +288,15 @@ pub async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf, read
                     // The client missed `n` chunks; its view is corrupt.
                     // Re-sync with a fresh snapshot + mode re-asserts
                     // instead of streaming a torn tail (spec §4.5).
+                    // Resubscribe FIRST: a lagged receiver repositions to the
+                    // oldest retained chunk, which would replay up to the full
+                    // buffer of stale pre-snapshot output on top of the fresh
+                    // snapshot (and immediately re-lag under pressure).
+                    // resubscribe() starts at the tail instead; bytes emitted
+                    // during capture-pane double-paint and self-correct, same
+                    // as the attach path.
                     tracing::debug!("session {}: client lagged {n} chunks, resyncing", sess.id);
+                    rx = rx.resubscribe();
                     carry.clear();
                     if !send_resync(&mut sink, &sess, &data_dir, &tmux_name).await {
                         break;
