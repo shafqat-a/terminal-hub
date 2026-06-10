@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -31,7 +31,7 @@ pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     peer.map(|p| p.ip().to_string()).unwrap_or_default()
 }
 
-fn json_error(status: StatusCode, message: &str) -> Response {
+pub(crate) fn json_error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({"error": message}))).into_response()
 }
 
@@ -98,4 +98,66 @@ pub async fn login(
         Json(json!({"success": true, "token": token})),
     )
         .into_response()
+}
+
+// ---- Session CRUD handlers --------------------------------------------------
+
+/// GET /api/sessions → 200 [{id, name, createdAt, status, lastActivityAt,
+///                           lastClientDisconnectAt, cols, rows}, ...]
+pub async fn sessions_list(State(state): State<SharedState>) -> Response {
+    let list = state.manager.list().await;
+    (StatusCode::OK, Json(list)).into_response()
+}
+
+/// POST /api/sessions → 201 {id, name}
+/// Body is optional; decode errors are silently ignored (Go parity).
+pub async fn sessions_create(State(state): State<SharedState>, body: Bytes) -> Response {
+    #[derive(serde::Deserialize, Default)]
+    struct CreateRequest {
+        #[serde(default)]
+        name: Option<String>,
+    }
+    let req: CreateRequest = serde_json::from_slice(&body).unwrap_or_default();
+    let name = req.name.filter(|n| !n.is_empty());
+
+    match state.manager.create(name).await {
+        Ok(sess) => {
+            let id = sess.id.clone();
+            let name = sess.name.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            (StatusCode::CREATED, Json(json!({"id": id, "name": name}))).into_response()
+        }
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// PUT /api/sessions/:id → 200 {success:true} / 400 / 404
+pub async fn sessions_rename(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    #[derive(serde::Deserialize)]
+    struct RenameRequest {
+        #[serde(default)]
+        name: String,
+    }
+    let req: RenameRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return json_error(StatusCode::BAD_REQUEST, "name required"),
+    };
+    if req.name.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "name required");
+    }
+    match state.manager.rename(&id, &req.name).await {
+        Ok(()) => (StatusCode::OK, Json(json!({"success": true}))).into_response(),
+        Err(_) => json_error(StatusCode::NOT_FOUND, &format!("session {id} not found")),
+    }
+}
+
+/// DELETE /api/sessions/:id → 200 {success:true} / 404
+pub async fn sessions_delete(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+    match state.manager.delete(&id).await {
+        Ok(()) => (StatusCode::OK, Json(json!({"success": true}))).into_response(),
+        Err(_) => json_error(StatusCode::NOT_FOUND, &format!("session {id} not found")),
+    }
 }

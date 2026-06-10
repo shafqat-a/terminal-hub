@@ -1,18 +1,20 @@
 use std::sync::Arc;
 
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::Router;
 
 use crate::auth::ratelimit::RateLimiter;
 use crate::auth::AuthService;
 use crate::config::Config;
 use crate::handlers;
+use crate::session;
 
 pub struct AppState {
     pub cfg: Config,
     pub auth: AuthService,
     pub limiter: RateLimiter,
-    pub store: store::Store,
+    pub store: Arc<store::Store>,
+    pub manager: session::Manager,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -21,14 +23,18 @@ pub fn build_state(cfg: Config) -> SharedState {
     let auth = AuthService::new(&cfg.password);
     let limiter = RateLimiter::new(cfg.login_max_attempts, cfg.login_window, cfg.login_lockout);
     let db_path = cfg.data_dir.join("conductor.db");
-    let store = store::Store::open(&db_path)
-        .unwrap_or_else(|e| panic!("cannot open store at {}: {e}", db_path.display()));
-    tracing::debug!(shell = %cfg.shell, "session shell configured");
+    let store = Arc::new(
+        store::Store::open(&db_path)
+            .unwrap_or_else(|e| panic!("cannot open store at {}: {e}", db_path.display())),
+    );
+    let manager =
+        session::Manager::new(cfg.data_dir.clone(), cfg.shell.clone(), Arc::clone(&store));
     Arc::new(AppState {
         cfg,
         auth,
         limiter,
         store,
+        manager,
     })
 }
 
@@ -37,7 +43,11 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/terminal", get(|| async { "terminal placeholder (M2)" }))
         .route(
             "/api/sessions",
-            get(|| async { axum::Json(serde_json::json!([])) }),
+            get(handlers::sessions_list).post(handlers::sessions_create),
+        )
+        .route(
+            "/api/sessions/:id",
+            put(handlers::sessions_rename).delete(handlers::sessions_delete),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -186,7 +196,7 @@ mod tests {
             .oneshot(Request::get("/terminal").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::SEE_OTHER); // axum Redirect::to = 303
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
         assert_eq!(res.headers().get(header::LOCATION).unwrap(), "/");
     }
 
@@ -268,9 +278,8 @@ mod tests {
     #[tokio::test]
     async fn expired_token_is_rejected_by_middleware() {
         let (app, dir) = test_app();
-        // Plant an already-expired session directly in the same DB file.
         let db = store::Store::open(&dir.path().join("conductor.db")).unwrap();
-        db.add_auth_session("expiredtoken", 1).unwrap(); // expired long ago
+        db.add_auth_session("expiredtoken", 1).unwrap();
         let res = app
             .oneshot(
                 Request::get("/terminal")
@@ -349,5 +358,231 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---- Session CRUD tests -----------------------------------------------
+
+    async fn authed_request(
+        app: &axum::Router,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> axum::http::Response<axum::body::Body> {
+        let mut builder = match method {
+            "GET" => Request::get(path),
+            "POST" => Request::post(path),
+            "PUT" => Request::put(path),
+            "DELETE" => Request::delete(path),
+            other => panic!("unsupported method: {other}"),
+        };
+        builder = builder.header("X-Session-Token", token);
+        if let Some(b) = body {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            app.clone()
+                .oneshot(builder.body(Body::from(b.to_string())).unwrap())
+                .await
+                .unwrap()
+        } else {
+            app.clone()
+                .oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        }
+    }
+
+    async fn body_json(res: axum::http::Response<axum::body::Body>) -> serde_json::Value {
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_session_returns_201_with_8_char_id() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v = body_json(res).await;
+        let id = v["id"].as_str().expect("id field");
+        assert_eq!(id.len(), 8, "id must be 8 chars");
+        assert_eq!(v["name"].as_str().unwrap(), id, "name defaults to id");
+        // cleanup
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    #[tokio::test]
+    async fn create_with_name() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            "/api/sessions",
+            Some(r#"{"name":"workbench"}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let v = body_json(res).await;
+        let id = v["id"].as_str().expect("id field");
+        assert_eq!(v["name"].as_str().unwrap(), "workbench");
+        // cleanup
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    #[tokio::test]
+    async fn list_sessions_has_exact_wire_fields() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let create_res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(create_res.status(), StatusCode::CREATED);
+        let created = body_json(create_res).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let list_res = authed_request(&app, &token, "GET", "/api/sessions", None).await;
+        assert_eq!(list_res.status(), StatusCode::OK);
+        let arr = body_json(list_res).await;
+        let arr = arr.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        let obj = arr[0].as_object().expect("object");
+
+        assert_eq!(
+            obj.len(),
+            8,
+            "expected exactly 8 keys, got: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(obj.contains_key("id"));
+        assert!(obj.contains_key("name"));
+        assert!(obj.contains_key("createdAt"));
+        assert!(obj.contains_key("status"));
+        assert!(obj.contains_key("lastActivityAt"));
+        assert!(obj.contains_key("lastClientDisconnectAt"));
+        assert!(obj.contains_key("cols"));
+        assert!(obj.contains_key("rows"));
+
+        let ca = obj["createdAt"].as_str().unwrap();
+        assert_eq!(ca.len(), 19, "createdAt len: {ca}");
+        let ca_chars: Vec<char> = ca.chars().collect();
+        assert_eq!(ca_chars[4], '-');
+        assert_eq!(ca_chars[7], '-');
+        assert_eq!(ca_chars[13], ':');
+        assert_eq!(ca_chars[16], ':');
+
+        assert_eq!(obj["status"].as_str().unwrap(), "running");
+        assert_eq!(obj["cols"].as_u64().unwrap(), 80);
+        assert_eq!(obj["rows"].as_u64().unwrap(), 24);
+
+        // cleanup
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    #[tokio::test]
+    async fn rename_session_roundtrip() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let create_res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        let created = body_json(create_res).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let rename_res = authed_request(
+            &app,
+            &token,
+            "PUT",
+            &format!("/api/sessions/{id}"),
+            Some(r#"{"name":"renamed"}"#),
+        )
+        .await;
+        assert_eq!(rename_res.status(), StatusCode::OK);
+        let v = body_json(rename_res).await;
+        assert_eq!(v, serde_json::json!({"success": true}));
+
+        let list_res = authed_request(&app, &token, "GET", "/api/sessions", None).await;
+        let arr = body_json(list_res).await;
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr[0]["name"].as_str().unwrap(), "renamed");
+
+        // cleanup
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    #[tokio::test]
+    async fn rename_empty_name_is_400() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let create_res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        let created = body_json(create_res).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let res = authed_request(
+            &app,
+            &token,
+            "PUT",
+            &format!("/api/sessions/{id}"),
+            Some(r#"{"name":""}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"error": "name required"}));
+
+        // cleanup
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    #[tokio::test]
+    async fn rename_unknown_is_404() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let res = authed_request(
+            &app,
+            &token,
+            "PUT",
+            "/api/sessions/zzzzzzzz",
+            Some(r#"{"name":"anything"}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v = body_json(res).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"error": "session zzzzzzzz not found"})
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_session_kills_tmux() {
+        let (app, dir) = test_app();
+        let token = obtain_token(&app).await;
+        let create_res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(create_res.status(), StatusCode::CREATED);
+        let created = body_json(create_res).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let del_res =
+            authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+        assert_eq!(del_res.status(), StatusCode::OK);
+        let v = body_json(del_res).await;
+        assert_eq!(v, serde_json::json!({"success": true}));
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let tmux_name = tmux::session_name(&id);
+        assert!(
+            !tmux::has_session(dir.path(), &tmux_name).await,
+            "tmux session should be gone after delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_is_404() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let res = authed_request(&app, &token, "DELETE", "/api/sessions/zzzzzzzz", None).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v = body_json(res).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"error": "session zzzzzzzz not found"})
+        );
     }
 }
