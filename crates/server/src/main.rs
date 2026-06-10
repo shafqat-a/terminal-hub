@@ -2,6 +2,7 @@ mod app;
 mod assets;
 mod auth;
 mod config;
+mod exec_history;
 mod handlers;
 pub mod session;
 mod ws;

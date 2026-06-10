@@ -73,6 +73,14 @@ pub fn build_app(state: SharedState) -> Router {
             "/api/sessions/:id",
             put(handlers::sessions_rename).delete(handlers::sessions_delete),
         )
+        .route(
+            "/api/sessions/:id/exec",
+            axum::routing::post(crate::exec_history::sessions_exec),
+        )
+        .route(
+            "/api/sessions/:id/history",
+            get(crate::exec_history::sessions_history),
+        )
         .route("/ws/:id", get(crate::ws::ws_session))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -832,5 +840,231 @@ mod tests {
             None,
         )
         .await;
+    }
+
+    // ---- U4: exec + history integration tests --------------------------------
+
+    /// exec round-trip: create session, exec `echo EXEC_PROOF_$((2+3))`,
+    /// verify output contains "EXEC_PROOF_5", timeout==false, truncated_bytes==0.
+    #[tokio::test]
+    async fn exec_round_trip() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        // Create session.
+        let create = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let created = body_json(create).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Give tmux a moment to initialise.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Exec command.
+        let exec_res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/exec"),
+            Some(r#"{"command":"echo EXEC_PROOF_$((2+3))"}"#),
+        )
+        .await;
+        assert_eq!(exec_res.status(), StatusCode::OK, "exec must return 200");
+        let v = body_json(exec_res).await;
+        let output = v["output"].as_str().unwrap_or("");
+        assert!(
+            output.contains("EXEC_PROOF_5"),
+            "output must contain EXEC_PROOF_5, got: {output:?}"
+        );
+        assert_eq!(v["timeout"], false, "timeout must be false");
+        assert_eq!(v["truncated_bytes"], 0, "truncated_bytes must be 0");
+
+        // Cleanup.
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    /// exec timeout: exec `sleep 5` with timeout=1 → 200, timeout==true, finishes quickly.
+    #[tokio::test]
+    async fn exec_timeout() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        let create = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let created = body_json(create).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let start = std::time::Instant::now();
+        let exec_res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/exec"),
+            Some(r#"{"command":"sleep 5","timeout":1}"#),
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(exec_res.status(), StatusCode::OK, "exec must return 200");
+        let v = body_json(exec_res).await;
+        assert_eq!(v["timeout"], true, "timeout must be true");
+        // Should complete within ~2s wall (1s timeout + 1s slack).
+        assert!(
+            elapsed.as_secs() < 4,
+            "exec with timeout=1 must return within ~4s wall, took: {elapsed:?}"
+        );
+
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    /// exec unknown session → 404 with wire-exact body.
+    #[tokio::test]
+    async fn exec_unknown_session_404() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            "/api/sessions/zzzzzzzz/exec",
+            Some(r#"{"command":"echo hi"}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v = body_json(res).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"error": "session not running"}),
+            "404 body must be wire-exact"
+        );
+    }
+
+    /// exec empty command → 400.
+    #[tokio::test]
+    async fn exec_empty_command_400() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        // Need a real session so the 400 is about the command, not 404.
+        let create = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let created = body_json(create).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/exec"),
+            Some(r#"{"command":""}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"error": "invalid request"}));
+
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    /// history returns output: create session, exec an echo, GET history → 200.
+    #[tokio::test]
+    async fn history_returns_output() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        let create = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let created = body_json(create).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Exec an echo to leave a known string in the pane.
+        authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/exec"),
+            Some(r#"{"command":"echo HISTORY_PROBE_XYZ"}"#),
+        )
+        .await;
+
+        // GET history.
+        let hist_res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/history"),
+            None,
+        )
+        .await;
+        assert_eq!(hist_res.status(), StatusCode::OK, "history must return 200");
+        let v = body_json(hist_res).await;
+        assert_eq!(
+            v["session_id"].as_str().unwrap(),
+            id,
+            "session_id must match"
+        );
+        let output = v["output"].as_str().unwrap_or("");
+        assert!(
+            output.contains("HISTORY_PROBE_XYZ"),
+            "history output must contain HISTORY_PROBE_XYZ, got: {output:?}"
+        );
+
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    /// history tail clamps: tail=10 → output bytes ≤ 10.
+    #[tokio::test]
+    async fn history_tail_clamps() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        let create = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let created = body_json(create).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let hist_res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/history?tail=10"),
+            None,
+        )
+        .await;
+        assert_eq!(hist_res.status(), StatusCode::OK);
+        let v = body_json(hist_res).await;
+        let output = v["output"].as_str().unwrap_or("");
+        // The output bytes must be ≤ 10. CRLF expansion can only add bytes, so
+        // the boundary-safe tail must yield ≤ 10 bytes.
+        assert!(
+            output.len() <= 10,
+            "tail=10 must yield ≤ 10 bytes, got {} bytes: {output:?}",
+            output.len()
+        );
+
+        authed_request(&app, &token, "DELETE", &format!("/api/sessions/{id}"), None).await;
+    }
+
+    /// history unknown session → 404 with wire-exact body.
+    #[tokio::test]
+    async fn history_unknown_404() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        let res = authed_request(&app, &token, "GET", "/api/sessions/zzzzzzzz/history", None).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v = body_json(res).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"error": "session not found"}),
+            "404 body must be wire-exact"
+        );
     }
 }

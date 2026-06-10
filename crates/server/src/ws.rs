@@ -69,15 +69,9 @@ async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf) {
     let tmux_name = tmux::session_name(&sess.id);
     match tmux::capture_pane(&data_dir, &tmux_name, 2000).await {
         Ok(bytes) => {
-            // Replace all bare \n with \r\n (byte-level).
-            let mut crlf: Vec<u8> = Vec::with_capacity(bytes.len() + 256);
-            for &b in &bytes {
-                if b == b'\n' {
-                    crlf.push(b'\r');
-                }
-                crlf.push(b);
-            }
-            let data = String::from_utf8_lossy(&crlf); // Lossy = Go parity; M5 adds UTF-8 boundary buffering (spec §4.1).
+            // Replace all bare \n with \r\n (byte-level) using the shared helper.
+            let crlf_bytes = crate::exec_history::crlf(&bytes);
+            let data = String::from_utf8_lossy(&crlf_bytes); // Lossy = Go parity; M5 adds UTF-8 boundary buffering (spec §4.1).
             let frame = serde_json::json!({"type": "output", "data": data}).to_string();
             // 10s write timeout for the snapshot frame.
             let send_result =
