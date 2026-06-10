@@ -7,6 +7,7 @@ use axum::Router;
 use crate::auth::ratelimit::RateLimiter;
 use crate::auth::AuthService;
 use crate::config::Config;
+use crate::files;
 use crate::handlers;
 use crate::session;
 use crate::shares;
@@ -86,6 +87,15 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/api/sessions/:id/share", post(shares::mint_share))
         .route("/api/sessions/:id/shares", get(shares::list_shares))
         .route("/api/shares/:id", delete(shares::revoke_share))
+        // File transfer routes (M4-U3); the body-limit override is scoped to
+        // the upload route only -- other routes keep axum's default cap.
+        .route(
+            "/api/sessions/:id/upload",
+            post(files::upload).layer(axum::extract::DefaultBodyLimit::max(
+                usize::try_from(state.cfg.max_upload_bytes).unwrap_or(usize::MAX),
+            )),
+        )
+        .route("/api/sessions/:id/download", get(files::download))
         .route("/ws/:id", get(crate::ws::ws_session))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -1352,6 +1362,291 @@ mod tests {
         );
         let v = body_json(res).await;
         assert_eq!(v, serde_json::json!({"success": true}));
+    }
+
+    // ---- U3: file transfer integration tests ---------------------------------
+
+    /// Send a multipart POST to /api/sessions/:id/upload with one form field.
+    async fn upload_request(
+        app: &axum::Router,
+        token: &str,
+        session_id: &str,
+        field: &str,
+        filename: &str,
+        content: &[u8],
+    ) -> axum::http::Response<axum::body::Body> {
+        let boundary = "xCONDUCTORxTESTxBOUNDARYx";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; \
+                 name=\"{field}\"; filename=\"{filename}\"\r\n\
+                 Content-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(content);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        app.clone()
+            .oneshot(
+                Request::post(format!("/api/sessions/{session_id}/upload").as_str())
+                    .header("X-Session-Token", token)
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Resolve the session's working directory exactly like the handlers do
+    /// (tmux pane_pid → readlink /proc/<pid>/cwd), polling tmux startup.
+    async fn wait_for_cwd(data_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
+        let tmux_name = tmux::session_name(id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if let Ok(pid) = tmux::pane_pid(data_dir, &tmux_name).await {
+                if let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
+                    return cwd;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "session {id} cwd must resolve within 3s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Drive the session's shell into `dir` (via exec, which types into the
+    /// pane) and wait until /proc reports it; returns the canonical path.
+    async fn cd_session_to(
+        app: &axum::Router,
+        token: &str,
+        data_dir: &std::path::Path,
+        id: &str,
+        dir: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let res = authed_request(
+            app,
+            token,
+            "POST",
+            &format!("/api/sessions/{id}/exec"),
+            Some(&format!(r#"{{"command":"cd {}"}}"#, dir.display())),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "cd exec must succeed");
+
+        let want = dir.canonicalize().expect("canonicalize work dir");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if wait_for_cwd(data_dir, id).await == want {
+                return want;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shell must report cwd {} within 3s",
+                want.display()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Upload lands in the session's actual cwd with 201 {name,size}, and
+    /// download round-trips the exact bytes with an attachment disposition.
+    #[tokio::test]
+    async fn upload_download_roundtrip() {
+        let (app, dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let work = tempfile::tempdir().unwrap();
+        let cwd = cd_session_to(&app, &token, dir.path(), &sess_id, work.path()).await;
+
+        let payload: &[u8] = b"ROUNDTRIP_PAYLOAD_\x00\xff\x01binary";
+        let res = upload_request(&app, &token, &sess_id, "file", "hello.txt", payload).await;
+        assert_eq!(res.status(), StatusCode::CREATED, "upload must return 201");
+        let v = body_json(res).await;
+        assert_eq!(v["name"].as_str().unwrap(), "hello.txt");
+        assert_eq!(v["size"].as_u64().unwrap(), payload.len() as u64);
+
+        // File must exist at the cwd resolved via the same pane_pid readlink.
+        let on_disk = std::fs::read(cwd.join("hello.txt")).expect("uploaded file must exist");
+        assert_eq!(on_disk, payload, "uploaded bytes must match");
+
+        // Download round-trip.
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{sess_id}/download?path=hello.txt"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "download must return 200");
+        assert_eq!(
+            res.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"hello.txt\"",
+        );
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ct.starts_with("text/plain"), "guessed mime for .txt: {ct}");
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], payload, "downloaded bytes must round-trip");
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    /// A traversal filename ("../evil") collapses to its base name and is
+    /// stored inside the working directory, never its parent.
+    #[tokio::test]
+    async fn upload_traversal_filename_stored_as_base() {
+        let (app, dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let work = tempfile::tempdir().unwrap();
+        let cwd = cd_session_to(&app, &token, dir.path(), &sess_id, work.path()).await;
+
+        let res = upload_request(&app, &token, &sess_id, "file", "../evil", b"nope").await;
+        assert_eq!(res.status(), StatusCode::CREATED, "upload must return 201");
+        let v = body_json(res).await;
+        assert_eq!(
+            v["name"].as_str().unwrap(),
+            "evil",
+            "name must be base name"
+        );
+
+        assert!(
+            cwd.join("evil").is_file(),
+            "file must land inside the working directory"
+        );
+        assert!(
+            !cwd.parent().unwrap().join("evil").exists(),
+            "traversal must not escape the working directory"
+        );
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    /// Over the configured cap → 413 with Go's conflated body.
+    #[tokio::test]
+    async fn upload_oversize_is_413() {
+        let (app, dir) =
+            test_app_with(|key| (key == "AI_CONDUCTOR_MAX_UPLOAD_BYTES").then(|| "1024".into()))
+                .await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+        // The handler resolves the cwd before reading the body.
+        wait_for_cwd(dir.path(), &sess_id).await;
+
+        let res =
+            upload_request(&app, &token, &sess_id, "file", "big.bin", &vec![b'x'; 4096]).await;
+        assert_eq!(
+            res.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "oversize upload must be 413"
+        );
+        let v = body_json(res).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"error": "upload too large or malformed"}),
+            "413 body must be wire-exact (Go conflates oversize/malformed)"
+        );
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    /// Upload error shapes: unknown session 404, missing "file" field 400,
+    /// invalid (dot-only) filename 400.
+    #[tokio::test]
+    async fn upload_error_cases() {
+        let (app, dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        // Unknown session → 404 before any body handling.
+        let res = upload_request(&app, &token, "zzzzzzzz", "file", "x.txt", b"x").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"error": "session not found"}));
+
+        let sess_id = create_session(&app, &token).await;
+        wait_for_cwd(dir.path(), &sess_id).await;
+
+        // Wrong field name → 400 missing file field.
+        let res = upload_request(&app, &token, &sess_id, "other", "x.txt", b"x").await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"error": "missing file field"}));
+
+        // Filename that sanitizes away → 400 invalid filename.
+        let res = upload_request(&app, &token, &sess_id, "file", "..", b"x").await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"error": "invalid filename"}));
+
+        delete_session(&app, &token, &sess_id).await;
+    }
+
+    /// Download error shapes: missing param 400, escape 403, missing file and
+    /// directory targets 404.
+    #[tokio::test]
+    async fn download_error_cases() {
+        let (app, dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let sess_id = create_session(&app, &token).await;
+        wait_for_cwd(dir.path(), &sess_id).await;
+
+        let get = |path: String| {
+            let app = app.clone();
+            let token = token.clone();
+            async move { authed_request(&app, &token, "GET", &path, None).await }
+        };
+
+        // No ?path= → 400.
+        let res = get(format!("/api/sessions/{sess_id}/download")).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"error": "path is required"}));
+
+        // Escape attempt → 403.
+        let res = get(format!(
+            "/api/sessions/{sess_id}/download?path=../../etc/passwd"
+        ))
+        .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let v = body_json(res).await;
+        assert_eq!(
+            v,
+            serde_json::json!({"error": "path outside working directory"})
+        );
+
+        // Missing file → 404.
+        let res = get(format!(
+            "/api/sessions/{sess_id}/download?path=definitely_not_here_u3"
+        ))
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"error": "file not found"}));
+
+        // Directory target (the cwd itself) → 404 (Go: Stat err or IsDir).
+        let res = get(format!("/api/sessions/{sess_id}/download?path=.")).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"error": "file not found"}));
+
+        delete_session(&app, &token, &sess_id).await;
     }
 
     #[tokio::test]

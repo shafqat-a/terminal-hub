@@ -7,6 +7,8 @@ pub enum TmuxError {
     Io(#[from] std::io::Error),
     #[error("tmux failed: {stderr}")]
     Failed { stderr: String },
+    #[error("tmux output parse error: {0}")]
+    Parse(String),
 }
 
 pub fn socket_path(data_dir: &Path) -> PathBuf {
@@ -74,6 +76,21 @@ pub async fn capture_pane(data_dir: &Path, name: &str, lines: u32) -> Result<Vec
         ],
     )
     .await
+}
+
+/// PID of the shell running in the session's pane. Used to resolve the
+/// session's working directory via `/proc/<pid>/cwd`, since the server only
+/// holds the tmux client process, not the shell itself (Go: tmuxPanePID).
+pub async fn pane_pid(data_dir: &Path, name: &str) -> Result<u32, TmuxError> {
+    let out = run(
+        data_dir,
+        &["display-message", "-p", "-t", name, "#{pane_pid}"],
+    )
+    .await?;
+    let text = String::from_utf8_lossy(&out);
+    text.trim()
+        .parse()
+        .map_err(|_| TmuxError::Parse(format!("pane_pid not a number: {:?}", text.trim())))
 }
 
 pub fn attach_args(data_dir: &Path, name: &str, shell: &str) -> Vec<String> {
@@ -264,6 +281,38 @@ mod tests {
         } else {
             panic!("expected TmuxError::Failed");
         }
+
+        // Cleanup
+        kill_session(data_dir, sess)
+            .await
+            .expect("kill should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_pane_pid() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let sess = "aidc_t6";
+
+        // Create a detached session
+        run(
+            data_dir,
+            &["new-session", "-d", "-s", sess, "--", "/bin/sh"],
+        )
+        .await
+        .expect("new-session should succeed");
+
+        let pid = pane_pid(data_dir, sess).await.expect("pane_pid Ok");
+        assert!(pid > 0, "pane pid must be positive");
+        // The pane's process must exist and its /proc cwd link must resolve.
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"));
+        assert!(cwd.is_ok(), "/proc/{pid}/cwd must be readable: {cwd:?}");
+
+        // Nonexistent session on a live server → Err.
+        assert!(
+            pane_pid(data_dir, "aidc_nope").await.is_err(),
+            "pane_pid of nonexistent session must error"
+        );
 
         // Cleanup
         kill_session(data_dir, sess)
