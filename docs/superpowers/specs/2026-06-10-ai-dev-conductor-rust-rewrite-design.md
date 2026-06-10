@@ -81,6 +81,9 @@ web/       ported conductor frontend (embedded at build)
 - **Resize policy:** latest-active-viewer wins, applied via `refresh-client -C WxH` (debounced client-side).
 - **Restart survival:** tmux sessions live in the external tmux server; on conductor restart, sessions are re-adopted by listing tmux sessions and matching against store metadata.
 
+
+**Amendment (M2, 2026-06-10):** Implementation replaced the control-mode design with the Go implementation's PTY-attach architecture: the server holds one PTY per session running `tmux new-session -A` and broadcasts raw bytes to viewers; `capture-pane -e -p -S -2000` repaints on every attach. Control mode + octal-escape parsing (the legacy terminal-hub approach) was implicated in the rendering bugs this rewrite exists to fix; PTY-attach is the architecture of the proven Go production system. tmux-as-model and repaint-on-reconnect are preserved.
+
 ## 4. Reliability requirements (warp-orion-derived edge-case contract)
 
 From the study of warp-orion (`crates/warp_terminal`, `app/src/terminal/local_tty`). Each item below ships with a test.

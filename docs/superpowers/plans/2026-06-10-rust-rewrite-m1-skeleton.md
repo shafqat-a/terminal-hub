@@ -1,6 +1,6 @@
 # Rust Rewrite M1 — Skeleton (workspace, config, server, auth, login page) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Stand up the Rust workspace and a running `ai-dev-conductor` server with health check, bcrypt login + per-IP throttling, session-token auth middleware, embedded static assets, and the ported login page — wire-compatible with the Go implementation.
 
@@ -33,7 +33,7 @@
 **Files:**
 - Create: `Cargo.toml`, `rust-toolchain.toml`, `.gitignore`, `crates/server/Cargo.toml`, `crates/server/src/main.rs`
 
-- [ ] **Step 1: Create workspace files**
+- [x] **Step 1: Create workspace files**
 
 `Cargo.toml`:
 ```toml
@@ -95,7 +95,7 @@ fn main() {
 }
 ```
 
-- [ ] **Step 2: Create the store crate stub**
+- [x] **Step 2: Create the store crate stub**
 
 `crates/store/Cargo.toml`:
 ```toml
@@ -114,12 +114,12 @@ thiserror = { workspace = true }
 // rusqlite-backed persistence. Populated in Task 3.
 ```
 
-- [ ] **Step 3: Verify it builds**
+- [x] **Step 3: Verify it builds**
 
 Run: `cargo check --workspace`
 Expected: `Finished` with no errors.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A && git commit -m "chore: cargo workspace skeleton (server + store crates)"
@@ -133,7 +133,7 @@ git add -A && git commit -m "chore: cargo workspace skeleton (server + store cra
 - Create: `crates/server/src/config.rs`
 - Modify: `crates/server/src/main.rs`, `crates/server/Cargo.toml`
 
-- [ ] **Step 1: Add dependencies**
+- [x] **Step 1: Add dependencies**
 
 In `crates/server/Cargo.toml` `[dependencies]` add:
 ```toml
@@ -141,7 +141,7 @@ humantime = "2"
 thiserror = { workspace = true }
 ```
 
-- [ ] **Step 2: Write failing tests**
+- [x] **Step 2: Write failing tests**
 
 Create `crates/server/src/config.rs` containing only the tests module for now:
 ```rust
@@ -205,12 +205,12 @@ fn main() {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `cargo test -p ai-dev-conductor config`
 Expected: COMPILE ERROR (`Config` not defined).
 
-- [ ] **Step 4: Implement Config**
+- [x] **Step 4: Implement Config**
 
 Prepend to `crates/server/src/config.rs` (above the tests module):
 ```rust
@@ -285,12 +285,12 @@ impl Config {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p ai-dev-conductor config`
 Expected: 3 passed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(config): env-based configuration with Go-compatible defaults"
@@ -303,7 +303,7 @@ git add -A && git commit -m "feat(config): env-based configuration with Go-compa
 **Files:**
 - Modify: `crates/store/Cargo.toml`, `crates/store/src/lib.rs`
 
-- [ ] **Step 1: Add dependencies**
+- [x] **Step 1: Add dependencies**
 
 `crates/store/Cargo.toml` `[dependencies]` becomes:
 ```toml
@@ -318,7 +318,7 @@ Add:
 tempfile = "3"
 ```
 
-- [ ] **Step 2: Write failing tests**
+- [x] **Step 2: Write failing tests**
 
 Append to `crates/store/src/lib.rs`:
 ```rust
@@ -375,12 +375,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `cargo test -p store`
 Expected: COMPILE ERROR (`Store` not defined).
 
-- [ ] **Step 4: Implement Store**
+- [x] **Step 4: Implement Store**
 
 Replace the top of `crates/store/src/lib.rs` (above the tests module) with:
 ```rust
@@ -447,12 +447,12 @@ impl Store {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p store`
 Expected: 5 passed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(store): rusqlite store with hashed auth session persistence"
@@ -466,7 +466,7 @@ git add -A && git commit -m "feat(store): rusqlite store with hashed auth sessio
 - Create: `crates/server/src/auth/mod.rs`, `crates/server/src/auth/ratelimit.rs` (empty until Task 5)
 - Modify: `crates/server/src/main.rs`, `crates/server/Cargo.toml`
 
-- [ ] **Step 1: Add dependencies**
+- [x] **Step 1: Add dependencies**
 
 `crates/server/Cargo.toml` `[dependencies]` add:
 ```toml
@@ -475,7 +475,7 @@ rand = "0.8"
 hex = "0.4"
 ```
 
-- [ ] **Step 2: Write tests and implementation**
+- [x] **Step 2: Write tests and implementation**
 
 Create `crates/server/src/auth/mod.rs`:
 ```rust
@@ -554,12 +554,12 @@ fn main() {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test -p ai-dev-conductor auth`
 Expected: 3 passed (bcrypt tests take a few seconds).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A && git commit -m "feat(auth): bcrypt password service + hex session token generation"
@@ -572,7 +572,7 @@ git add -A && git commit -m "feat(auth): bcrypt password service + hex session t
 **Files:**
 - Modify: `crates/server/src/auth/ratelimit.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 `crates/server/src/auth/ratelimit.rs` — add the tests module first:
 ```rust
@@ -670,12 +670,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p ai-dev-conductor ratelimit`
 Expected: COMPILE ERROR (`RateLimiter` not defined).
 
-- [ ] **Step 3: Implement RateLimiter**
+- [x] **Step 3: Implement RateLimiter**
 
 Prepend to `crates/server/src/auth/ratelimit.rs`:
 ```rust
@@ -756,12 +756,12 @@ impl RateLimiter {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p ai-dev-conductor ratelimit`
 Expected: 6 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(auth): per-IP login rate limiter with exponential lockout"
@@ -775,7 +775,7 @@ git add -A && git commit -m "feat(auth): per-IP login rate limiter with exponent
 - Create: `crates/server/src/app.rs`, `crates/server/src/handlers.rs`
 - Modify: `crates/server/src/main.rs`, `crates/server/Cargo.toml`
 
-- [ ] **Step 1: Add web dependencies**
+- [x] **Step 1: Add web dependencies**
 
 `crates/server/Cargo.toml` `[dependencies]` add:
 ```toml
@@ -792,7 +792,7 @@ http-body-util = "0.1"
 tempfile = "3"
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `crates/server/src/app.rs`:
 ```rust
@@ -886,12 +886,12 @@ fn main() {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cargo test -p ai-dev-conductor health`
 Expected: COMPILE ERROR (`handlers::health` not defined).
 
-- [ ] **Step 4: Implement the health handler**
+- [x] **Step 4: Implement the health handler**
 
 Replace `crates/server/src/handlers.rs`:
 ```rust
@@ -903,12 +903,12 @@ pub async fn health() -> Json<Value> {
 }
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `cargo test -p ai-dev-conductor health`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(server): axum app skeleton with /api/health"
@@ -921,7 +921,7 @@ git add -A && git commit -m "feat(server): axum app skeleton with /api/health"
 **Files:**
 - Modify: `crates/server/src/handlers.rs`, `crates/server/src/app.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Append inside the `tests` module in `crates/server/src/app.rs`:
 ```rust
@@ -993,12 +993,12 @@ Append inside the `tests` module in `crates/server/src/app.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p ai-dev-conductor login`
 Expected: FAIL — `/api/login` route missing (404s) or compile error.
 
-- [ ] **Step 3: Implement the login handler**
+- [x] **Step 3: Implement the login handler**
 
 Append to `crates/server/src/handlers.rs`:
 ```rust
@@ -1100,12 +1100,12 @@ and in `build_app`:
         .route("/api/login", post(handlers::login))
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p ai-dev-conductor login`
 Expected: 4 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(auth): wire-compatible /api/login with throttling and session cookie"
@@ -1119,7 +1119,7 @@ git add -A && git commit -m "feat(auth): wire-compatible /api/login with throttl
 - Create: `crates/server/src/auth/middleware.rs`
 - Modify: `crates/server/src/auth/mod.rs`, `crates/server/src/app.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Append inside the `tests` module in `crates/server/src/app.rs`:
 ```rust
@@ -1217,12 +1217,12 @@ Append inside the `tests` module in `crates/server/src/app.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p ai-dev-conductor token`
 Expected: FAIL (no `/terminal`, no `/api/sessions`, no middleware).
 
-- [ ] **Step 3: Implement the middleware**
+- [x] **Step 3: Implement the middleware**
 
 Create `crates/server/src/auth/middleware.rs`:
 ```rust
@@ -1310,12 +1310,12 @@ pub fn build_app(state: SharedState) -> Router {
 }
 ```
 
-- [ ] **Step 4: Run all server tests**
+- [x] **Step 4: Run all server tests**
 
 Run: `cargo test -p ai-dev-conductor`
 Expected: all pass (config 3, auth 3, ratelimit 6, health 1, login 4, middleware 6).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(auth): session-token middleware with Go-compatible lookup order"
@@ -1329,7 +1329,7 @@ git add -A && git commit -m "feat(auth): session-token middleware with Go-compat
 - Create: `crates/server/src/assets.rs`, `web/templates/login.html`, `web/static/css/style.css`
 - Modify: `crates/server/src/app.rs`, `crates/server/src/main.rs`, `crates/server/Cargo.toml`
 
-- [ ] **Step 1: Port the frontend files from the Go checkout**
+- [x] **Step 1: Port the frontend files from the Go checkout**
 
 ```bash
 mkdir -p web/templates web/static/css web/static/js
@@ -1346,7 +1346,7 @@ grep -n '{{' web/templates/login.html   # expect no output
 
 Open the file and verify after stripping: the login form must still POST to `/api/login` with JSON `{"password": ...}` and navigate to `/terminal` on success; static hrefs must resolve to `/static/...` (fix any path the sed left relative/broken, e.g. `href="static/css/style.css"` → `href="/static/css/style.css"`).
 
-- [ ] **Step 2: Add embed dependencies**
+- [x] **Step 2: Add embed dependencies**
 
 `crates/server/Cargo.toml` `[dependencies]` add:
 ```toml
@@ -1354,7 +1354,7 @@ rust-embed = "8"
 mime_guess = "2"
 ```
 
-- [ ] **Step 3: Write failing tests**
+- [x] **Step 3: Write failing tests**
 
 Append inside the `tests` module in `crates/server/src/app.rs`:
 ```rust
@@ -1393,12 +1393,12 @@ Append inside the `tests` module in `crates/server/src/app.rs`:
     }
 ```
 
-- [ ] **Step 4: Run tests to verify they fail**
+- [x] **Step 4: Run tests to verify they fail**
 
 Run: `cargo test -p ai-dev-conductor static`
 Expected: FAIL (routes missing).
 
-- [ ] **Step 5: Implement asset serving**
+- [x] **Step 5: Implement asset serving**
 
 Create `crates/server/src/assets.rs`:
 ```rust
@@ -1447,12 +1447,12 @@ In `build_app` (public section, above `.merge(protected)`) add:
         .route("/static/*path", get(crate::assets::static_file))
 ```
 
-- [ ] **Step 6: Run all tests**
+- [x] **Step 6: Run all tests**
 
 Run: `cargo test --workspace`
 Expected: all pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A && git commit -m "feat(web): embed ported login page and static assets"
@@ -1465,7 +1465,7 @@ git add -A && git commit -m "feat(web): embed ported login page and static asset
 **Files:**
 - Modify: `crates/server/src/main.rs`
 
-- [ ] **Step 1: Implement main**
+- [x] **Step 1: Implement main**
 
 Replace `crates/server/src/main.rs`:
 ```rust
@@ -1514,7 +1514,7 @@ async fn main() {
 }
 ```
 
-- [ ] **Step 2: Build and smoke-test manually**
+- [x] **Step 2: Build and smoke-test manually**
 
 ```bash
 cargo build
@@ -1531,12 +1531,12 @@ curl -s http://127.0.0.1:8099/ | head -5
 kill %1
 ```
 
-- [ ] **Step 3: Run the full quality gate**
+- [x] **Step 3: Run the full quality gate**
 
 Run: `cargo test --workspace && cargo clippy --workspace -- -D warnings && cargo fmt --check`
 Expected: clean. Fix any clippy/fmt findings before committing.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A && git commit -m "feat(server): main entrypoint with graceful shutdown and pid file"
@@ -1549,7 +1549,7 @@ git add -A && git commit -m "feat(server): main entrypoint with graceful shutdow
 **Files:**
 - Create: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Create the workflow**
+- [x] **Step 1: Create the workflow**
 
 `.github/workflows/ci.yml`:
 ```yaml
@@ -1576,14 +1576,14 @@ jobs:
 
 (tmux is unused in M1 but required from M2 on; installing now keeps the workflow stable.)
 
-- [ ] **Step 2: Commit and push**
+- [x] **Step 2: Commit and push**
 
 ```bash
 git add -A && git commit -m "ci: fmt + clippy + test workflow"
 git push origin main
 ```
 
-- [ ] **Step 3: Verify CI is green**
+- [x] **Step 3: Verify CI is green**
 
 Check https://github.com/shafqat-a/terminal-hub/actions (or `gh run watch --repo shafqat-a/terminal-hub` from a machine with `gh`).
 Expected: workflow passes.
