@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use tokio::sync::broadcast;
 
+use super::modes::ModeState;
+
 #[derive(Debug, thiserror::Error)]
 pub enum PtyError {
     #[error("pty error: {0}")]
@@ -27,6 +29,9 @@ pub struct PtyHandle {
     master: Mutex<Box<dyn MasterPty + Send>>,
     /// Unix seconds of most recent output activity.
     pub last_activity: Arc<AtomicI64>,
+    /// Session-level DEC private mode tracker (spec §4.3), fed by the reader
+    /// thread before broadcast so every client sees a consistent view.
+    pub modes: Arc<Mutex<ModeState>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     /// Signals true once the PTY reader thread exits (child process ended).
     exited: tokio::sync::watch::Sender<bool>,
@@ -85,6 +90,7 @@ impl PtyHandle {
 
         let (tx, _rx) = broadcast::channel(1024);
         let last_activity = Arc::new(AtomicI64::new(unix_now()));
+        let modes = Arc::new(Mutex::new(ModeState::new()));
         let (exited_tx, _exited_rx) = tokio::sync::watch::channel(false);
 
         let handle = Arc::new(PtyHandle {
@@ -92,6 +98,7 @@ impl PtyHandle {
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             last_activity: Arc::clone(&last_activity),
+            modes: Arc::clone(&modes),
             child: Mutex::new(child),
             exited: exited_tx,
         });
@@ -109,6 +116,12 @@ impl PtyHandle {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         activity.store(unix_now(), Ordering::Relaxed);
+                        // Mode scan runs before broadcast so a client attaching
+                        // right after this chunk replays an up-to-date set.
+                        modes
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .feed(&buf[..n]);
                         tx_reader.send(buf[..n].to_vec()).ok();
                     }
                 }
@@ -132,6 +145,10 @@ impl PtyHandle {
     }
 
     /// Resize the PTY window.
+    ///
+    /// Serialization (spec §4.4): the `master` mutex makes each TIOCSWINSZ
+    /// atomic per session, so a storm of resize frames — even from multiple
+    /// clients — cannot interleave and tmux converges on the last size.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<(), PtyError> {
         let master = self.master.lock().unwrap_or_else(|e| e.into_inner());
         master
