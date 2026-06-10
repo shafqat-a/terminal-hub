@@ -21,7 +21,7 @@ pub struct AppState {
 
 pub type SharedState = Arc<AppState>;
 
-pub fn build_state(cfg: Config) -> SharedState {
+pub async fn build_state(cfg: Config) -> SharedState {
     let auth = AuthService::new(&cfg.password);
     let limiter = RateLimiter::new(cfg.login_max_attempts, cfg.login_window, cfg.login_lockout);
     let db_path = cfg.data_dir.join("conductor.db");
@@ -49,14 +49,18 @@ pub fn build_state(cfg: Config) -> SharedState {
         "session limits configured"
     );
 
-    Arc::new(AppState {
+    let state = Arc::new(AppState {
         cfg,
         auth,
         limiter,
         store,
         manager,
         api_key,
-    })
+    });
+
+    state.manager.init().await;
+
+    state
 }
 
 pub fn build_app(state: SharedState) -> Router {
@@ -90,7 +94,7 @@ pub mod test_support {
     use super::*;
 
     /// App over a throwaway temp data dir; returns the dir to keep it alive.
-    pub fn test_app() -> (Router, tempfile::TempDir) {
+    pub async fn test_app() -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::from_lookup(|key| match key {
             "AI_CONDUCTOR_DATA_DIR" => Some(dir.path().display().to_string()),
@@ -99,7 +103,7 @@ pub mod test_support {
             _ => None,
         })
         .unwrap();
-        (build_app(build_state(cfg)), dir)
+        (build_app(build_state(cfg).await), dir)
     }
 }
 
@@ -113,7 +117,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_ok_json() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = app
             .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
             .await
@@ -142,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_success_returns_token_and_cookie() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = login(app, r#"{"password":"testpass"}"#, None).await;
         assert_eq!(res.status(), StatusCode::OK);
         let cookie = res
@@ -164,7 +168,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_wrong_password_is_401() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = login(app, r#"{"password":"nope"}"#, None).await;
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         let body = res.into_body().collect().await.unwrap().to_bytes();
@@ -174,7 +178,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_malformed_json_is_400() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = login(app, "{not json", None).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         let body = res.into_body().collect().await.unwrap().to_bytes();
@@ -184,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_throttles_after_max_attempts_with_retry_after() {
-        let (app, _dir) = test_app(); // default max_attempts = 5
+        let (app, _dir) = test_app().await; // default max_attempts = 5
         for _ in 0..5 {
             let res = login(app.clone(), r#"{"password":"nope"}"#, Some("10.1.1.7")).await;
             assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -214,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_without_token_redirects_to_login() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = app
             .oneshot(Request::get("/terminal").body(Body::empty()).unwrap())
             .await
@@ -225,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_without_token_gets_401_json() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = app
             .oneshot(Request::get("/api/sessions").body(Body::empty()).unwrap())
             .await
@@ -238,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn header_token_grants_access() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let res = app
             .oneshot(
@@ -254,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_token_grants_access() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let res = app
             .oneshot(
@@ -269,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn cookie_token_grants_access() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let res = app
             .oneshot(
@@ -285,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn garbage_token_is_rejected() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = app
             .oneshot(
                 Request::get("/terminal")
@@ -300,7 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_token_is_rejected_by_middleware() {
-        let (app, dir) = test_app();
+        let (app, dir) = test_app().await;
         let db = store::Store::open(&dir.path().join("conductor.db")).unwrap();
         db.add_auth_session("expiredtoken", 1).unwrap();
         let res = app
@@ -317,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_serves_login_page() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = app
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
             .await
@@ -353,7 +357,7 @@ mod tests {
 
     #[tokio::test]
     async fn static_css_is_served_with_mime() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = app
             .oneshot(
                 Request::get("/static/css/style.css")
@@ -375,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_static_path_is_404() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = app
             .oneshot(Request::get("/static/nope.js").body(Body::empty()).unwrap())
             .await
@@ -421,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_returns_201_with_8_char_id() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
         assert_eq!(res.status(), StatusCode::CREATED);
@@ -435,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_with_name() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let res = authed_request(
             &app,
@@ -455,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions_has_exact_wire_fields() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let create_res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
         assert_eq!(create_res.status(), StatusCode::CREATED);
@@ -502,7 +506,7 @@ mod tests {
 
     #[tokio::test]
     async fn rename_session_roundtrip() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let create_res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
         let created = body_json(create_res).await;
@@ -531,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn rename_empty_name_is_400() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let create_res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
         let created = body_json(create_res).await;
@@ -555,7 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn rename_unknown_is_404() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let res = authed_request(
             &app,
@@ -575,7 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_session_kills_tmux() {
-        let (app, dir) = test_app();
+        let (app, dir) = test_app().await;
         let token = obtain_token(&app).await;
         let create_res = authed_request(&app, &token, "POST", "/api/sessions", None).await;
         assert_eq!(create_res.status(), StatusCode::CREATED);
@@ -598,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_unknown_is_404() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let res = authed_request(&app, &token, "DELETE", "/api/sessions/zzzzzzzz", None).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -611,7 +615,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_serves_ported_ui() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let res = app
             .oneshot(
@@ -654,8 +658,8 @@ mod tests {
 
     #[tokio::test]
     async fn api_key_grants_api_access() {
-        let (app, _dir) = test_app();
-        // "testapikey" is set in test_app's config lookup
+        let (app, _dir) = test_app().await;
+        // "testapikey" is set in test_app config lookup
         let res = app
             .oneshot(
                 Request::get("/api/sessions")
@@ -670,7 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_key_grants_terminal() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = app
             .oneshot(
                 Request::get("/terminal")
@@ -685,7 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_api_key_falls_through() {
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         // Wrong key, no session token -> falls through to token path -> rejected
         let res_api = app
             .clone()
@@ -717,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn cookie_still_works_without_api_key_header() {
         // Confirm that existing cookie-based auth is unaffected.
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let token = obtain_token(&app).await;
         let res = app
             .oneshot(
@@ -734,9 +738,9 @@ mod tests {
     #[tokio::test]
     async fn wrong_length_api_key_is_rejected() {
         // Checks that a key of different length is not length-leaked
-        // (note: subtle ct_eq short-circuits on length mismatch — a length oracle.
+        // (note: subtle ct_eq short-circuits on length mismatch -- a length oracle.
         // Harmless for fixed-64-hex keys; M5 may hash both sides. Assert rejected.)
-        let (app, _dir) = test_app();
+        let (app, _dir) = test_app().await;
         let res = app
             .oneshot(
                 Request::get("/api/sessions")

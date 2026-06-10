@@ -1,5 +1,5 @@
 //! PTY-backed tmux session runtime.
-//!
+//
 //! Each `PtyHandle` holds one PTY attached to a tmux session via
 //! `tmux new-session -A`. Output is broadcast to all subscribers; any
 //! caller may write input or resize the terminal.
@@ -28,6 +28,8 @@ pub struct PtyHandle {
     /// Unix seconds of most recent output activity.
     pub last_activity: Arc<AtomicI64>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// Signals true once the PTY reader thread exits (child process ended).
+    exited: tokio::sync::watch::Sender<bool>,
 }
 
 fn unix_now() -> i64 {
@@ -83,6 +85,7 @@ impl PtyHandle {
 
         let (tx, _rx) = broadcast::channel(1024);
         let last_activity = Arc::new(AtomicI64::new(unix_now()));
+        let (exited_tx, _exited_rx) = tokio::sync::watch::channel(false);
 
         let handle = Arc::new(PtyHandle {
             output: tx.clone(),
@@ -90,11 +93,14 @@ impl PtyHandle {
             master: Mutex::new(pair.master),
             last_activity: Arc::clone(&last_activity),
             child: Mutex::new(child),
+            exited: exited_tx,
         });
 
         // Reader thread: forward PTY output to the broadcast channel.
+        // Signals `exited` watch when the loop ends (EOF or error).
         let tx_reader = tx;
         let activity = Arc::clone(&last_activity);
+        let exited_signal = handle.exited.clone();
         let mut reader = reader;
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -107,9 +113,15 @@ impl PtyHandle {
                     }
                 }
             }
+            exited_signal.send_replace(true);
         });
 
         Ok(handle)
+    }
+
+    /// Returns a receiver that fires (true) when the PTY child process exits.
+    pub fn exited_rx(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.exited.subscribe()
     }
 
     /// Write bytes to the PTY (stdin of the tmux client).
@@ -202,7 +214,7 @@ mod tests {
         handle.detach();
         tmux::kill_session(data_dir, &name).await.ok();
 
-        assert!(found, "broadcast should contain 'm2proof'");
+        assert!(found, "broadcast should contain m2proof");
     }
 
     #[tokio::test]
@@ -266,5 +278,30 @@ mod tests {
         tmux::kill_session(data_dir, &name).await.ok();
 
         assert!(alive, "tmux session should still exist after PTY detach");
+    }
+
+    #[tokio::test]
+    async fn exited_rx_fires_when_child_exits() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let id = "ptyt4";
+        let name = tmux::session_name(id);
+
+        let handle =
+            PtyHandle::spawn(data_dir, &name, "/bin/sh", 24, 80).expect("spawn should succeed");
+
+        let mut exited_rx = handle.exited_rx();
+        // Should not yet be true.
+        assert!(!*exited_rx.borrow());
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Kill the tmux session, which causes the PTY child to exit.
+        tmux::kill_session(data_dir, &name).await.ok();
+        handle.detach();
+
+        // Wait up to 3s for the exited signal.
+        let fired = tokio::time::timeout(Duration::from_secs(3), exited_rx.changed()).await;
+        assert!(fired.is_ok(), "exited_rx should fire within 3s");
+        assert!(*exited_rx.borrow(), "exited value must be true");
     }
 }

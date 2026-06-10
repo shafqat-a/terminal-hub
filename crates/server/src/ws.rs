@@ -211,7 +211,7 @@ mod tests {
             _ => None,
         })
         .unwrap();
-        let state = build_state(cfg);
+        let state = build_state(cfg).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = build_app(state.clone()).into_make_service_with_connect_info::<SocketAddr>();

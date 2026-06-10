@@ -24,7 +24,7 @@ async fn main() {
     let pid_file = cfg.pid_file.clone();
     let addr = cfg.addr.clone();
 
-    let state = app::build_state(cfg);
+    let state = app::build_state(cfg).await;
     let router = app::build_app(state).into_make_service_with_connect_info::<SocketAddr>();
 
     let listener = tokio::net::TcpListener::bind(&addr)
