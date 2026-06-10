@@ -40,7 +40,7 @@ pub fn build_state(cfg: Config) -> SharedState {
 
 pub fn build_app(state: SharedState) -> Router {
     let protected = Router::new()
-        .route("/terminal", get(|| async { "terminal placeholder (M2)" }))
+        .route("/terminal", get(crate::assets::terminal_page))
         .route(
             "/api/sessions",
             get(handlers::sessions_list).post(handlers::sessions_create),
@@ -584,6 +584,47 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({"error": "session zzzzzzzz not found"})
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_serves_ported_ui() {
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let res = app
+            .oneshot(
+                Request::get(format!("/terminal?token={token}").as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            ct.starts_with("text/html"),
+            "content-type must be text/html, got: {ct}"
+        );
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("xterm"), "terminal page must reference xterm");
+        assert!(
+            html.contains("/static/js/app.js"),
+            "terminal page must reference app.js (which contains the /ws/ WebSocket logic)"
+        );
+        assert!(
+            !html.contains("{{"),
+            "no Go template directives may survive the port"
+        );
+        assert!(
+            !html.contains("BASE_PATH"),
+            "no dangling BASE_PATH references"
         );
     }
 }

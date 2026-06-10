@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Dev Conductor</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app" id="app">
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h1>Sessions</h1>
+                <button class="btn-add-server" id="btn-add-server" title="Add remote server">+ Server</button>
+            </div>
+            <button class="btn-new-session" id="btn-new-session">+ New Session</button>
+            <div class="session-list" id="session-list"></div>
+        </aside>
+        <div class="sidebar-scrim" id="sidebar-scrim"></div>
+        <main class="terminal-area">
+            <div class="topbar">
+                <button class="btn-icon only-mobile" id="btn-sidebar-toggle" title="Sessions">&#9776;</button>
+                <span class="topbar-title" id="topbar-title">AI Dev Conductor</span>
+                <button class="btn-icon" id="btn-palette" title="Command palette (Ctrl/Cmd+K)">&#8984;K</button>
+                <button class="btn-icon" id="btn-settings" title="Settings">&#9881;</button>
+            </div>
+            <div class="terminal-placeholder" id="placeholder">
+                Create or select a session to start
+            </div>
+            <div id="terminal-container" style="display:none;"></div>
+            <div class="mobile-keybar" id="mobile-keybar">
+                <button data-seq="&#x1b;">Esc</button>
+                <button data-seq="&#x09;">Tab</button>
+                <button data-action="ctrl" id="key-ctrl">Ctrl</button>
+                <button data-seq="&#x1b;[A">&#8593;</button>
+                <button data-seq="&#x1b;[B">&#8595;</button>
+                <button data-seq="&#x1b;[D">&#8592;</button>
+                <button data-seq="&#x1b;[C">&#8594;</button>
+                <button data-seq="&#x03;">^C</button>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

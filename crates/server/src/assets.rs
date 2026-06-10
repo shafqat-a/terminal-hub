@@ -27,6 +27,10 @@ pub async fn login_page() -> Response {
     serve("templates/login.html")
 }
 
+pub async fn terminal_page() -> Response {
+    serve("templates/terminal.html")
+}
+
 pub async fn static_file(Path(rest): Path<String>) -> Response {
     serve(&format!("static/{rest}"))
 }
