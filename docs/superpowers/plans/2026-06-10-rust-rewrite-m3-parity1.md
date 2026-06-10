@@ -35,13 +35,13 @@
 
 ## Execution units (each: implement → spec review → quality review)
 
-### U1 — Config + API-key auth
+### - [x] U1 — Config + API-key auth
 - Config: `api_key: Option<String>` (lookup AI_CONDUCTOR_API_KEY; from_lookup stays pure — generation happens in build_state: None → 32 rand bytes hex + `tracing::info!("API key: {key}")`). Add `idle_timeout: Duration` (AI_CONDUCTOR_IDLE_TIMEOUT, default 0 = disabled) and `max_sessions: u32` (AI_CONDUCTOR_MAX_SESSIONS, default 0) — these were NOT in the M1 config; add with tests (defaults + overrides).
 - AppState gains resolved `api_key: String`. require_auth: if `X-API-Key` header present and non-empty → subtle ConstantTimeEq vs state.api_key → match = authorized; else fall through to existing token path. Dep: subtle = "2".
 - Tests: valid key grants /api/sessions AND /terminal; wrong key + no token → 401 JSON on /api, 303 on /terminal; absent header + valid cookie still works; key comparison not length-leaky (just assert wrong-length key rejected).
 - Commit: `feat(auth): X-API-Key authentication with constant-time comparison`
 
-### U2 — Store v2 + status lifecycle + re-adoption
+### - [x] U2 — Store v2 + status lifecycle + re-adoption
 - Versioned migrations (user_version); v2 columns; `SessionRow` struct; new methods incl. mark_all_detached/set_status/set_activity/set_size/get_session; list_sessions → rows. TDD incl. v1→v2 upgrade test (create DB with v1 code path [simulate: execute v1 DDL manually + set user_version=1], reopen via Store::open, columns exist, data preserved).
 - Manager re-adoption: build_state/Manager gains async `init()` (await in main + tests): mark_all_detached → tmux::list_sessions filter `aidc_` → for each: PtyHandle::spawn (-A attach) + store row lookup (restore name/created_at; missing → upsert) → live map + set_status running.
 - Dead detection: PtyHandle gains `exited: tokio::sync::watch::Sender<bool>` signalled by the reader thread on EOF; Manager spawns per-session monitor: on exited → if still in map (not mid-delete) → set_status dead, remove from map, fire session.closed (WS viewers drop).
@@ -50,21 +50,21 @@
 - Tests (real tmux): re-adoption across manager instances on same data_dir (create via A; drop A without killing tmux; init B → listed running, name/created_at preserved, write works); store-only detached row listed with status detached; dead detection (external `tmux kill-session` → within ~3s status dead + WS closed — reuse delete_disconnects_viewer harness pattern); delete of detached row 200; delete of unknown 404.
 - Commits: `feat(store): versioned migrations + session lifecycle columns` → `feat(session): status lifecycle, restart re-adoption, dead detection`
 
-### U3 — Idle reaping + max sessions + flush loop
+### - [x] U3 — Idle reaping + max sessions + flush loop
 - Reap loop spawned in init when idle_timeout > 0 (interval = timeout/2 clamp [1s,60s]); victims per contract; loops stop when Manager dropped (abort JoinHandles in Drop).
 - create: ErrSessionLimit when live count >= max_sessions (>0) → handler 429 `{"error":"session limit reached"}`.
 - Flush loop every flush_interval (default 15s; injectable via #[cfg(test)] setter or ctor param) → set_activity + set_size.
 - Tests: cap wire-exact 429; reap with idle_timeout=2s (never-attached session disappears ≤6s, tmux killed); attached session NOT reaped (viewer_attached held past timeout); flush with 200ms interval persists activity/size (assert store row updates).
 - Commit: `feat(session): idle reaping, max-session cap, activity flush loop`
 
-### U4 — exec + history endpoints
+### - [x] U4 — exec + history endpoints
 - `extract_exec_output(captured: &str, command: &str, marker: &str) -> (String, bool)` pure fn, unit-tested on fixtures: echoed-command line skipped, marker line excluded, ANSI preserved, marker absent → (tail, timed_out=true) semantics handled by caller.
 - exec handler per contract (rand marker, `\n` then command+echo marker via pty.write, 50ms capture-pane poll loop, 500KB cap with truncated_bytes, default 30 clamp [1,120]); 404 "session not running" for non-live (incl. detached); 400 empty/missing command.
 - history handler per contract (tail param, UTF-8-boundary-safe tail slice — unit test multibyte boundary; LF→CRLF same as WS snapshot).
 - Routes in protected router. Integration tests (real tmux): exec echo round-trip with $((2+3)) arithmetic, exec timeout=1 on `sleep 5` → 200 timeout=true, unknown id 404 wire-exact, empty command 400, history contains prior echo, tail clamps, unknown id 404 "session not found".
 - Commit: `feat(api): exec and history endpoints (tmux-sourced, Go wire shapes)`
 
-### U5 — Milestone gate + smoke + push
+### - [x] U5 — Milestone gate + smoke + push
 1. Full gate (test/clippy/fmt) — paste summaries.
 2. Real-binary smoke, CONTENT-verified (M2 lesson: assert bodies, and `cargo build` immediately before starting the server in the SAME ssh session): grep auto-generated API key from server log; exec via X-API-Key returns real command output; history returns bytes containing a known echo; MAX_SESSIONS=1 → second create 429 body-exact; RESTART smoke: create session → exec `echo RESTART_PROOF` → SIGINT server → restart same data_dir → GET /api/sessions shows session status running with original name → history contains RESTART_PROOF.
 3. Tick M3 plan checkboxes; commit `docs: M3 checkboxes`; push; poll GitHub Actions API until the HEAD run concludes success.
