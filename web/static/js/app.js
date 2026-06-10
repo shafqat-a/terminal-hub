@@ -185,7 +185,7 @@ class TerminalManager {
     getServerBaseUrl(server) {
         // Local server requests are same-origin but must carry the app's base path
         // (e.g. /terminaltest) when it's served under a reverse-proxy subpath.
-        if (server.isLocal || !server.url) return '';
+        if (server.isLocal || !server.url) return window.BASE_PATH || '';
         return server.url.replace(/\/$/, '');
     }
 
@@ -278,7 +278,7 @@ class TerminalManager {
                     const res = await this.fetchFromServer(server, '/api/sessions');
                     if (res.status === 401) {
                         if (server.isLocal) {
-                            window.location.href = '/';
+                            window.location.href = (window.BASE_PATH || '') + '/';
                             return [];
                         }
                         server.connected = false;
@@ -482,7 +482,7 @@ class TerminalManager {
             });
             if (res.status === 401) {
                 if (targetServer.isLocal) {
-                    window.location.href = '/';
+                    window.location.href = (window.BASE_PATH || '') + '/';
                 } else {
                     await this.authenticateServer(targetServer);
                 }
@@ -589,7 +589,7 @@ class TerminalManager {
             // is set; otherwise it's a path we resolve against the server's origin.
             let link = data.url || data.path;
             if (link && !/^https?:\/\//i.test(link)) {
-                const base = server.isLocal ? window.location.origin : this.getServerBaseUrl(server);
+                const base = server.isLocal ? window.location.origin + (window.BASE_PATH || '') : this.getServerBaseUrl(server);
                 link = base + link;
             }
             this.showShareLink(link, data.expiresAt);
@@ -745,7 +745,7 @@ class TerminalManager {
         let wsUrl;
         if (server.isLocal) {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            wsUrl = protocol + '//' + window.location.host + '/ws/' + sessionId;
+            wsUrl = protocol + '//' + window.location.host + (window.BASE_PATH || '') + '/ws/' + sessionId;
         } else {
             const url = new URL(server.url);
             const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';

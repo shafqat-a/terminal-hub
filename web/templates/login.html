@@ -92,6 +92,7 @@
         <div class="error" id="error"></div>
     </div>
     <script>
+        window.BASE_PATH = "__BASE_PATH__";
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const btn = document.getElementById('submitBtn');
@@ -102,13 +103,13 @@
             errorEl.style.display = 'none';
 
             try {
-                const res = await fetch('/api/login', {
+                const res = await fetch((window.BASE_PATH || '') + '/api/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ password }),
                 });
                 if (res.ok) {
-                    window.location.href = '/terminal';
+                    window.location.href = (window.BASE_PATH || '') + '/terminal';
                 } else {
                     const data = await res.json();
                     errorEl.textContent = data.error || 'Authentication failed';

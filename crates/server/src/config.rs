@@ -25,6 +25,21 @@ pub struct Config {
     pub public_url: String,
     /// Upload size cap in bytes (AI_CONDUCTOR_MAX_UPLOAD_BYTES, default 100 MiB).
     pub max_upload_bytes: u64,
+    /// URL path prefix the app is mounted under (AI_CONDUCTOR_BASE_PATH).
+    /// Normalized to "" (root) or "/prefix" — leading slash, no trailing slash.
+    pub base_path: String,
+}
+
+/// Normalize a configured base path into "" (root) or "/prefix" with a
+/// leading slash and no trailing slash. Nested prefixes are preserved
+/// (Go parity: `normalizeBasePath`).
+fn normalize_base_path(raw: &str) -> String {
+    let p = raw.trim().trim_matches('/');
+    if p.is_empty() {
+        String::new()
+    } else {
+        format!("/{p}")
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -115,6 +130,7 @@ impl Config {
             )?,
             public_url: lookup("AI_CONDUCTOR_PUBLIC_URL").unwrap_or_default(),
             max_upload_bytes,
+            base_path: normalize_base_path(&lookup("AI_CONDUCTOR_BASE_PATH").unwrap_or_default()),
         })
     }
 }
@@ -165,6 +181,7 @@ mod tests {
             cfg.max_upload_bytes, 104_857_600,
             "max_upload_bytes must default to 100 MiB"
         );
+        assert_eq!(cfg.base_path, "", "base_path must default to empty string");
     }
 
     #[test]
@@ -274,6 +291,33 @@ mod tests {
             (key == "AI_CONDUCTOR_MAX_UPLOAD_BYTES").then(|| "notanumber".to_string())
         };
         assert!(Config::from_lookup(lookup).is_err());
+    }
+
+    #[test]
+    fn base_path_is_normalized() {
+        // (input, expected) — Go parity: TestNormalizeBasePath.
+        let cases = [
+            ("", ""),
+            ("/", ""),
+            ("  ", ""),
+            ("terminaltest", "/terminaltest"),
+            ("/terminaltest", "/terminaltest"),
+            ("/terminaltest/", "/terminaltest"),
+            ("  /terminaltest/ ", "/terminaltest"),
+            ("  /app/ ", "/app"),
+            ("a/b", "/a/b"),
+            ("/a/b/", "/a/b"),
+        ];
+        for (input, expected) in cases {
+            let lookup = |key: &str| -> Option<String> {
+                (key == "AI_CONDUCTOR_BASE_PATH").then(|| input.to_string())
+            };
+            let cfg = Config::from_lookup(lookup).unwrap();
+            assert_eq!(
+                cfg.base_path, expected,
+                "normalize_base_path({input:?}) must be {expected:?}"
+            );
+        }
     }
 
     #[test]
