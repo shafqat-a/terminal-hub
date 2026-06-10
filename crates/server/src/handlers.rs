@@ -126,6 +126,9 @@ pub async fn sessions_create(State(state): State<SharedState>, body: Bytes) -> R
             let name = sess.name.lock().unwrap_or_else(|e| e.into_inner()).clone();
             (StatusCode::CREATED, Json(json!({"id": id, "name": name}))).into_response()
         }
+        Err(crate::session::CreateError::SessionLimit) => {
+            json_error(StatusCode::TOO_MANY_REQUESTS, "session limit reached")
+        }
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }

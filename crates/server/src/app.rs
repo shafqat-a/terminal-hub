@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::routing::{get, post, put};
 use axum::Router;
@@ -29,8 +30,14 @@ pub async fn build_state(cfg: Config) -> SharedState {
         store::Store::open(&db_path)
             .unwrap_or_else(|e| panic!("cannot open store at {}: {e}", db_path.display())),
     );
-    let manager =
-        session::Manager::new(cfg.data_dir.clone(), cfg.shell.clone(), Arc::clone(&store));
+    let manager = session::Manager::new(
+        cfg.data_dir.clone(),
+        cfg.shell.clone(),
+        Arc::clone(&store),
+        cfg.idle_timeout,
+        cfg.max_sessions,
+        Duration::from_secs(15),
+    );
 
     let api_key = match &cfg.api_key {
         Some(k) => k.clone(),
@@ -40,14 +47,6 @@ pub async fn build_state(cfg: Config) -> SharedState {
             key
         }
     };
-
-    // idle_timeout and max_sessions are consumed by U3 (reap loop + session cap).
-    // Log them at startup so the compiler sees them referenced.
-    tracing::debug!(
-        idle_timeout = ?cfg.idle_timeout,
-        max_sessions = cfg.max_sessions,
-        "session limits configured"
-    );
 
     let state = Arc::new(AppState {
         cfg,
@@ -95,12 +94,28 @@ pub mod test_support {
 
     /// App over a throwaway temp data dir; returns the dir to keep it alive.
     pub async fn test_app() -> (Router, tempfile::TempDir) {
+        test_app_with(|_| None).await
+    }
+
+    /// App with additional config overrides layered on top of the defaults.
+    /// `extra` is called after the standard lookup; return `Some(value)` to
+    /// override a key, `None` to fall through to the standard defaults.
+    pub async fn test_app_with(
+        extra: impl Fn(&str) -> Option<String> + 'static,
+    ) -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::from_lookup(|key| match key {
-            "AI_CONDUCTOR_DATA_DIR" => Some(dir.path().display().to_string()),
-            "AI_CONDUCTOR_PASSWORD" => Some("testpass".into()),
-            "AI_CONDUCTOR_API_KEY" => Some("testapikey".into()),
-            _ => None,
+        let data_dir = dir.path().display().to_string();
+        let cfg = Config::from_lookup(|key| {
+            // extra overrides come first.
+            if let Some(v) = extra(key) {
+                return Some(v);
+            }
+            match key {
+                "AI_CONDUCTOR_DATA_DIR" => Some(data_dir.clone()),
+                "AI_CONDUCTOR_PASSWORD" => Some("testpass".into()),
+                "AI_CONDUCTOR_API_KEY" => Some("testapikey".into()),
+                _ => None,
+            }
         })
         .unwrap();
         (build_app(build_state(cfg).await), dir)
@@ -109,7 +124,7 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::test_app;
+    use super::test_support::{test_app, test_app_with};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
@@ -751,5 +766,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ---- U3: max-session cap test -----------------------------------------
+
+    /// POST /api/sessions with max_sessions=1: first → 201, second → 429 body-exact,
+    /// delete first → third → 201.
+    #[tokio::test]
+    async fn cap_returns_429() {
+        let (app, _dir) =
+            test_app_with(|key| (key == "AI_CONDUCTOR_MAX_SESSIONS").then(|| "1".into())).await;
+        let token = obtain_token(&app).await;
+
+        // First create: must succeed.
+        let res1 = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(
+            res1.status(),
+            StatusCode::CREATED,
+            "first create must be 201"
+        );
+        let v1 = body_json(res1).await;
+        let id1 = v1["id"].as_str().unwrap().to_string();
+
+        // Second create: must be 429 with exact body.
+        let res2 = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(
+            res2.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "second create must be 429"
+        );
+        let v2 = body_json(res2).await;
+        assert_eq!(
+            v2,
+            serde_json::json!({"error": "session limit reached"}),
+            "429 body must be wire-exact"
+        );
+
+        // Delete first session.
+        let del = authed_request(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/api/sessions/{id1}"),
+            None,
+        )
+        .await;
+        assert_eq!(del.status(), StatusCode::OK);
+
+        // Third create: must succeed now that slot freed.
+        let res3 = authed_request(&app, &token, "POST", "/api/sessions", None).await;
+        assert_eq!(
+            res3.status(),
+            StatusCode::CREATED,
+            "third create must succeed after delete"
+        );
+        let v3 = body_json(res3).await;
+        let id3 = v3["id"].as_str().unwrap().to_string();
+
+        // Cleanup.
+        authed_request(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/api/sessions/{id3}"),
+            None,
+        )
+        .await;
     }
 }

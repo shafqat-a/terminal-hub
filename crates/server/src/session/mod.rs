@@ -3,15 +3,17 @@
 pub mod pty;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Serialize;
 use time::format_description::FormatItem;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 
 use crate::session::pty::PtyHandle;
 
@@ -101,11 +103,46 @@ pub enum CreateError {
     Spawn(#[from] pty::PtyError),
     #[error("store error: {0}")]
     Store(#[from] store::StoreError),
+    #[error("session limit reached")]
+    SessionLimit,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("session not found")]
 pub struct NotFound;
+
+// ---- Free helper: delete a session by id given bare Arc fields --------------
+//
+// Used by both Manager::delete and the reap loop (which can't call &self
+// methods because it only holds Arc clones of the fields, not a &Manager).
+
+async fn delete_session_by_id(
+    sessions: &Arc<RwLock<HashMap<String, Arc<Session>>>>,
+    store: &Arc<store::Store>,
+    data_dir: &Path,
+    id: &str,
+) -> Result<(), NotFound> {
+    let live = sessions.write().await.remove(id);
+    if let Some(session) = live {
+        session.pty.detach();
+        tmux::kill_session(data_dir, &tmux::session_name(id))
+            .await
+            .ok();
+        session.closed.send_replace(true);
+        store.delete_session(id).map_err(|_| NotFound)?;
+        return Ok(());
+    }
+    // No live session -- check for a store-only row.
+    let row = store.get_session(id).unwrap_or(None);
+    if row.is_some() {
+        tmux::kill_session(data_dir, &tmux::session_name(id))
+            .await
+            .ok();
+        store.delete_session(id).map_err(|_| NotFound)?;
+        return Ok(());
+    }
+    Err(NotFound)
+}
 
 // ---- Manager ----------------------------------------------------------------
 
@@ -114,20 +151,46 @@ pub struct Manager {
     shell: String,
     sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
     store: Arc<store::Store>,
+    idle_timeout: Duration,
+    max_sessions: u32,
+    flush_interval: Duration,
+    /// Background loop handles; aborted on Drop.
+    loop_handles: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl Drop for Manager {
+    fn drop(&mut self) {
+        let handles = self.loop_handles.lock().unwrap_or_else(|e| e.into_inner());
+        for h in handles.iter() {
+            h.abort();
+        }
+    }
 }
 
 impl Manager {
-    pub fn new(data_dir: PathBuf, shell: String, store: Arc<store::Store>) -> Self {
+    pub fn new(
+        data_dir: PathBuf,
+        shell: String,
+        store: Arc<store::Store>,
+        idle_timeout: Duration,
+        max_sessions: u32,
+        flush_interval: Duration,
+    ) -> Self {
         Manager {
             data_dir,
             shell,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             store,
+            idle_timeout,
+            max_sessions,
+            flush_interval,
+            loop_handles: Mutex::new(Vec::new()),
         }
     }
 
     /// Called once after construction: mark all DB rows detached, then re-adopt
     /// any live `aidc_*` tmux sessions left from a previous server run.
+    /// Spawns background loops (reap + flush) at the end.
     pub async fn init(&self) {
         // All persisted sessions are assumed detached until we confirm they are live.
         self.store.mark_all_detached().ok();
@@ -187,6 +250,90 @@ impl Manager {
 
             tracing::info!(id, "re-adopted tmux session");
         }
+
+        // ---- Spawn background loops -----------------------------------------
+
+        // Reap loop: only if idle_timeout > 0.
+        if self.idle_timeout > Duration::ZERO {
+            let raw_half = self.idle_timeout / 2;
+            let interval = raw_half
+                .max(Duration::from_secs(1))
+                .min(Duration::from_secs(60));
+            let idle_timeout = self.idle_timeout;
+            let sessions = Arc::clone(&self.sessions);
+            let store = Arc::clone(&self.store);
+            let data_dir = self.data_dir.clone();
+
+            let handle = tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    let now = unix_now_secs();
+                    let idle_secs = idle_timeout.as_secs() as i64;
+
+                    // Collect victims: viewers == 0 AND idle basis older than idle_timeout.
+                    let victims: Vec<String> = {
+                        let map = sessions.read().await;
+                        map.values()
+                            .filter(|s| {
+                                let viewers = s.viewers.load(Ordering::Relaxed);
+                                if viewers > 0 {
+                                    return false;
+                                }
+                                let disconnect = s.last_client_disconnect.load(Ordering::Relaxed);
+                                let basis = if disconnect > 0 {
+                                    disconnect
+                                } else {
+                                    s.created_at
+                                };
+                                (now - basis) > idle_secs
+                            })
+                            .map(|s| s.id.clone())
+                            .collect()
+                    };
+
+                    for id in victims {
+                        tracing::info!("session {id}: reaped (idle > {idle_timeout:?})");
+                        delete_session_by_id(&sessions, &store, &data_dir, &id)
+                            .await
+                            .ok();
+                    }
+                }
+            });
+
+            self.loop_handles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(handle);
+        }
+
+        // Flush loop: always active.
+        {
+            let flush_interval = self.flush_interval;
+            let sessions = Arc::clone(&self.sessions);
+            let store = Arc::clone(&self.store);
+
+            let handle = tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(flush_interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    let map = sessions.read().await;
+                    for s in map.values() {
+                        let activity = s.pty.last_activity.load(Ordering::Relaxed);
+                        store.set_activity(&s.id, activity).ok();
+                        let (cols, rows) = *s.size.lock().unwrap_or_else(|e| e.into_inner());
+                        store.set_size(&s.id, cols as i64, rows as i64).ok();
+                    }
+                }
+            });
+
+            self.loop_handles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(handle);
+        }
     }
 
     /// Spawn the dead-detection monitor task for a session.
@@ -218,6 +365,14 @@ impl Manager {
 
     /// Create a new session. `name` defaults to the generated id.
     pub async fn create(&self, name: Option<String>) -> Result<Arc<Session>, CreateError> {
+        // Cap check: if max_sessions > 0 and the live map is at or over the limit, reject.
+        if self.max_sessions > 0 {
+            let count = self.sessions.read().await.len();
+            if count >= self.max_sessions as usize {
+                return Err(CreateError::SessionLimit);
+            }
+        }
+
         let full_uuid = uuid::Uuid::new_v4().simple().to_string();
         let id = full_uuid[..8].to_string();
         let session_name = name.unwrap_or_else(|| id.clone());
@@ -339,28 +494,7 @@ impl Manager {
 
     /// Delete a session: handles both live sessions and store-only rows.
     pub async fn delete(&self, id: &str) -> Result<(), NotFound> {
-        let live = self.sessions.write().await.remove(id);
-        if let Some(session) = live {
-            session.pty.detach();
-            tmux::kill_session(&self.data_dir, &tmux::session_name(id))
-                .await
-                .ok();
-            // Signal all viewers that this session has been deleted.
-            session.closed.send_replace(true);
-            self.store.delete_session(id).map_err(|_| NotFound)?;
-            return Ok(());
-        }
-        // No live session -- check for a store-only row.
-        let row = self.store.get_session(id).unwrap_or(None);
-        if row.is_some() {
-            // Kill any orphan tmux session (best effort).
-            tmux::kill_session(&self.data_dir, &tmux::session_name(id))
-                .await
-                .ok();
-            self.store.delete_session(id).map_err(|_| NotFound)?;
-            return Ok(());
-        }
-        Err(NotFound)
+        delete_session_by_id(&self.sessions, &self.store, &self.data_dir, id).await
     }
 }
 
@@ -374,7 +508,14 @@ mod tests {
 
     fn make_manager(dir: &std::path::Path) -> Manager {
         let store = Arc::new(store::Store::open(&dir.join("conductor.db")).expect("store open"));
-        Manager::new(dir.to_path_buf(), "/bin/sh".into(), store)
+        Manager::new(
+            dir.to_path_buf(),
+            "/bin/sh".into(),
+            store,
+            Duration::ZERO,
+            0,
+            Duration::from_secs(15),
+        )
     }
 
     #[tokio::test]
@@ -715,5 +856,142 @@ mod tests {
         // Delete again: NotFound.
         let err = mgr.delete(id).await;
         assert!(err.is_err(), "second delete must return NotFound");
+    }
+
+    // ---- U3 tests -----------------------------------------------------------
+
+    /// Idle session (never attached) is reaped within the deadline.
+    #[tokio::test]
+    async fn reap_idle_session() {
+        let dir = tempdir().unwrap();
+        let store =
+            Arc::new(store::Store::open(&dir.path().join("conductor.db")).expect("store open"));
+        let mgr = Manager::new(
+            dir.path().to_path_buf(),
+            "/bin/sh".into(),
+            Arc::clone(&store),
+            Duration::from_secs(2), // idle_timeout = 2s
+            0,
+            Duration::from_millis(100),
+        );
+        mgr.init().await;
+
+        let sess = mgr.create(None).await.expect("create");
+        let id = sess.id.clone();
+        let tmux_name = tmux::session_name(&id);
+
+        // Never attach -- poll list() until empty (≤8s).
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut reaped = false;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if mgr.list().await.is_empty() {
+                reaped = true;
+                break;
+            }
+        }
+        assert!(reaped, "idle session must be reaped within 8s");
+        // tmux session must also be gone.
+        assert!(
+            !tmux::has_session(dir.path(), &tmux_name).await,
+            "tmux session must be killed by reaper"
+        );
+    }
+
+    /// Session with an attached viewer is NOT reaped during the idle window.
+    #[tokio::test]
+    async fn attached_session_not_reaped() {
+        let dir = tempdir().unwrap();
+        let store =
+            Arc::new(store::Store::open(&dir.path().join("conductor.db")).expect("store open"));
+        let mgr = Manager::new(
+            dir.path().to_path_buf(),
+            "/bin/sh".into(),
+            Arc::clone(&store),
+            Duration::from_secs(2),
+            0,
+            Duration::from_millis(100),
+        );
+        mgr.init().await;
+
+        let sess = mgr.create(None).await.expect("create");
+        let id = sess.id.clone();
+
+        // Attach a viewer.
+        sess.viewer_attached();
+
+        // Wait 3s (> idle_timeout) -- session must still be present.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            mgr.get(&id).await.is_some(),
+            "attached session must NOT be reaped"
+        );
+
+        // Detach -- now it becomes idle.
+        sess.viewer_detached();
+
+        // Poll until reaped (≤8s).
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut reaped = false;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if mgr.get(&id).await.is_none() {
+                reaped = true;
+                break;
+            }
+        }
+        assert!(reaped, "session must be reaped after viewer detaches");
+    }
+
+    /// Flush loop persists last_activity_at and size within the deadline.
+    #[tokio::test]
+    async fn flush_persists_activity_and_size() {
+        let dir = tempdir().unwrap();
+        let store =
+            Arc::new(store::Store::open(&dir.path().join("conductor.db")).expect("store open"));
+        let mgr = Manager::new(
+            dir.path().to_path_buf(),
+            "/bin/sh".into(),
+            Arc::clone(&store),
+            Duration::ZERO,
+            0,
+            Duration::from_millis(200), // fast flush for test
+        );
+        mgr.init().await;
+
+        let sess = mgr.create(None).await.expect("create");
+        let id = sess.id.clone();
+
+        // Give tmux a moment to start.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Write to PTY to drive last_activity.
+        sess.pty.write(b"echo FLUSH_TEST\n").ok();
+
+        // Update size via session.size and pty.resize.
+        {
+            let mut sz = sess.size.lock().unwrap_or_else(|e| e.into_inner());
+            *sz = (132, 40);
+        }
+        sess.pty.resize(40, 132).ok();
+
+        // Poll store for ≤3s until last_activity_at > 0 and cols/rows correct.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut ok = false;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Ok(Some(row)) = store.get_session(&id) {
+                if row.last_activity_at > 0 && row.cols == 132 && row.rows == 40 {
+                    ok = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            ok,
+            "flush loop must persist last_activity_at > 0 and cols=132 rows=40 within 3s"
+        );
+
+        mgr.delete(&id).await.expect("delete");
     }
 }
