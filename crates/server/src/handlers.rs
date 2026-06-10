@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, State};
@@ -35,12 +34,10 @@ pub(crate) fn json_error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({"error": message}))).into_response()
 }
 
-pub(crate) fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock predates Unix epoch")
-        .as_secs() as i64
-}
+// unix_now() moved to crate::util (M5 housekeeping). The re-export keeps the
+// `crate::handlers::unix_now` path working for ws.rs, which is owned by a
+// parallel M5 unit; inline it there at merge time.
+pub(crate) use crate::util::unix_now;
 
 pub async fn login(
     State(state): State<SharedState>,

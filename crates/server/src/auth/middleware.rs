@@ -5,6 +5,7 @@ use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use super::COOKIE_NAME;
@@ -58,7 +59,15 @@ pub async fn require_auth(State(state): State<SharedState>, req: Request, next: 
     // Check X-API-Key first (Go parity: API key auth takes precedence).
     if let Some(provided) = req.headers().get("X-API-Key").and_then(|v| v.to_str().ok()) {
         if !provided.is_empty() {
-            let key_match = provided.as_bytes().ct_eq(state.api_key.as_bytes()).into();
+            // Hash both sides before the constant-time compare: ct_eq on raw
+            // strings short-circuits on length mismatch, leaking the key
+            // length. Equal-length digests kill that oracle.
+            let provided_hash = Sha256::digest(provided.as_bytes());
+            let expected_hash = Sha256::digest(state.api_key.as_bytes());
+            let key_match: bool = provided_hash
+                .as_slice()
+                .ct_eq(expected_hash.as_slice())
+                .into();
             if key_match {
                 return next.run(req).await;
             }
@@ -66,7 +75,7 @@ pub async fn require_auth(State(state): State<SharedState>, req: Request, next: 
         }
     }
 
-    let now = crate::handlers::unix_now();
+    let now = crate::util::unix_now();
     let valid = token_from_request(&req)
         .map(|t| state.store.validate_auth_session(&t, now).unwrap_or(false))
         .unwrap_or(false);

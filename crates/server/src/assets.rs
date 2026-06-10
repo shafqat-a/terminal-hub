@@ -88,6 +88,12 @@ pub async fn terminal_page(State(state): State<SharedState>) -> Response {
 }
 
 pub async fn static_file(State(state): State<SharedState>, Path(rest): Path<String>) -> Response {
+    // Reject any ".." path segment before lookup. Embedded assets cannot
+    // traverse, but debug builds serve rust-embed assets straight from the
+    // filesystem, where "static/../templates/x" would escape the static dir.
+    if rest.split('/').any(|seg| seg == "..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let path = format!("static/{rest}");
     // Only text assets that can carry `__BASE_PATH__` placeholders go through
     // substitution; everything else (css, images, ...) is served verbatim.

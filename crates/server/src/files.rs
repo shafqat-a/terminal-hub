@@ -64,6 +64,38 @@ pub fn sanitize_filename(name: &str) -> Option<String> {
     Some(base)
 }
 
+/// Quote a filename like Go's `fmt.Sprintf("%q", name)` (strconv.Quote), as
+/// used by the Go download handler for the Content-Disposition filename:
+/// wrap in double quotes; escape `"` and `\` with a backslash; named escapes
+/// for \a \b \f \n \r \t \v; remaining ASCII control chars and DEL become
+/// `\xNN` (lowercase hex). Printable non-ASCII passes through literally, as
+/// in Go. Documented divergence: Go additionally \u-escapes *non-printable*
+/// non-ASCII runes (per unicode.IsPrint); those never appear in real
+/// filenames and Rust has no IsPrint table, so they pass through here.
+pub fn go_quote(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('"');
+    for c in name.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\x07' => out.push_str("\\a"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x0b' => out.push_str("\\v"),
+            c if (c as u32) < 0x20 || c == '\x7f' => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Join `rel` onto `base` and guarantee the result stays within `base`,
 /// defeating "../" traversal (Go: confinedPath). Like Go's `filepath.Join`,
 /// an absolute `rel` is treated as relative and lands under `base`.
@@ -208,16 +240,20 @@ pub async fn download(
         return json_error(StatusCode::FORBIDDEN, "path outside working directory");
     };
 
-    let is_file = tokio::fs::metadata(&full)
-        .await
-        .map(|m| m.is_file())
-        .unwrap_or(false);
-    if !is_file {
-        return json_error(StatusCode::NOT_FOUND, "file not found");
-    }
-    let Ok(bytes) = tokio::fs::read(&full).await else {
-        return json_error(StatusCode::NOT_FOUND, "file not found");
+    // Stat before opening (Go: os.Stat err or IsDir → 404). Keeping the
+    // metadata also supplies Content-Length for the streamed body, matching
+    // Go's http.ServeFile.
+    let meta = match tokio::fs::metadata(&full).await {
+        Ok(m) if m.is_file() => m,
+        _ => return json_error(StatusCode::NOT_FOUND, "file not found"),
     };
+    // Stream the file instead of buffering it in RAM; an open failure after
+    // the successful stat (e.g. the file vanished) is still a plain 404.
+    let file = match tokio::fs::File::open(&full).await {
+        Ok(f) => f,
+        Err(_) => return json_error(StatusCode::NOT_FOUND, "file not found"),
+    };
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
 
     let basename = full
         .file_name()
@@ -229,11 +265,13 @@ pub async fn download(
         [
             (
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{basename}\""),
+                // Go: fmt.Sprintf("attachment; filename=%q", filepath.Base(full)).
+                format!("attachment; filename={}", go_quote(&basename)),
             ),
             (header::CONTENT_TYPE, mime.essence_str().to_string()),
+            (header::CONTENT_LENGTH, meta.len().to_string()),
         ],
-        bytes,
+        body,
     )
         .into_response()
 }
@@ -273,6 +311,22 @@ mod tests {
         assert_eq!(sanitize_filename("a\\b"), Some("a\\b".into()));
         // Whitespace-padded names are kept untrimmed (Go only checks TrimSpace).
         assert_eq!(sanitize_filename(" x "), Some(" x ".into()));
+    }
+
+    // Cases verified against Go: fmt.Sprintf("%q", name) (strconv.Quote).
+    #[test]
+    fn go_quote_cases() {
+        assert_eq!(go_quote("hello.txt"), r#""hello.txt""#);
+        assert_eq!(go_quote(r#"he"llo.txt"#), r#""he\"llo.txt""#);
+        assert_eq!(go_quote(r"back\slash"), r#""back\\slash""#);
+        assert_eq!(go_quote("tab\tname"), r#""tab\tname""#);
+        assert_eq!(go_quote("nl\nname"), r#""nl\nname""#);
+        assert_eq!(go_quote("bell\x07name"), r#""bell\aname""#);
+        assert_eq!(go_quote("ctl\x01name"), r#""ctl\x01name""#);
+        assert_eq!(go_quote("del\x7fname"), r#""del\x7fname""#);
+        // Printable non-ASCII passes through literally (Go parity).
+        assert_eq!(go_quote("żółć.txt"), "\"żółć.txt\"");
+        assert_eq!(go_quote("emoji🎉.txt"), "\"emoji🎉.txt\"");
     }
 
     // Cases mirror Go's TestConfinedPath (api/filetransfer_test.go).

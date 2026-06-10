@@ -1,6 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::Request;
+use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 
@@ -64,6 +68,40 @@ pub async fn build_state(cfg: Config) -> SharedState {
     state
 }
 
+/// CORS middleware (Go parity: main.go corsMiddleware, applied to the
+/// outermost router). When an Origin header is present, reflect it and attach
+/// the fixed allow-lists; ANY OPTIONS request short-circuits to an empty 204
+/// — even without an Origin header, exactly like Go.
+async fn cors(req: Request, next: Next) -> Response {
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .filter(|v| !v.is_empty())
+        .cloned();
+    let mut res = if req.method() == Method::OPTIONS {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await
+    };
+    if let Some(origin) = origin {
+        let headers = res.headers_mut();
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Content-Type, X-Session-Token"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("3600"),
+        );
+    }
+    res
+}
+
 pub fn build_app(state: SharedState) -> Router {
     let base_path = state.cfg.base_path.clone();
     let protected = Router::new()
@@ -114,31 +152,35 @@ pub fn build_app(state: SharedState) -> Router {
         .merge(protected)
         .with_state(state);
 
-    if base_path.is_empty() {
-        return app;
-    }
+    let app = if base_path.is_empty() {
+        app
+    } else {
+        // Mount the entire app under the base path (Go parity: r.Route(BasePath, ...)).
+        // Nesting at "{base_path}/" maps the inner "/" route to "{base_path}/"
+        // exactly; the bare prefix gets an explicit 301 to the login page (Go
+        // parity: http.StatusMovedPermanently — axum's Redirect::permanent is 308,
+        // so the response is built by hand), and anything outside the prefix
+        // falls through to the default 404.
+        let target = format!("{base_path}/");
+        let redirect_target = target.clone();
+        Router::new()
+            .route(
+                &base_path,
+                get(move || {
+                    let target = redirect_target.clone();
+                    async move {
+                        (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, target)])
+                            .into_response()
+                    }
+                }),
+            )
+            .nest(&target, app)
+    };
 
-    // Mount the entire app under the base path (Go parity: r.Route(BasePath, ...)).
-    // Nesting at "{base_path}/" maps the inner "/" route to "{base_path}/"
-    // exactly; the bare prefix gets an explicit 301 to the login page (Go
-    // parity: http.StatusMovedPermanently — axum's Redirect::permanent is 308,
-    // so the response is built by hand), and anything outside the prefix
-    // falls through to the default 404.
-    let target = format!("{base_path}/");
-    let redirect_target = target.clone();
-    Router::new()
-        .route(
-            &base_path,
-            get(move || {
-                let target = redirect_target.clone();
-                async move {
-                    use axum::http::{header, StatusCode};
-                    use axum::response::IntoResponse;
-                    (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, target)]).into_response()
-                }
-            }),
-        )
-        .nest(&target, app)
+    // CORS wraps the outermost router (Go: r.Use(corsMiddleware) on the top
+    // chi mux) so it covers every route — public share routes, the base-path
+    // nest, the bare-prefix 301, and the fallback 404.
+    app.layer(axum::middleware::from_fn(cors))
 }
 
 #[cfg(test)]
@@ -227,7 +269,12 @@ mod tests {
         assert!(cookie.starts_with("ai_conductor_session="));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Strict"));
-        assert!(cookie.contains("Path=/"));
+        // Exact "Path=/;" — at root the cookie must be scoped to "/" itself,
+        // not merely some path starting with "/".
+        assert!(
+            cookie.contains("Path=/;"),
+            "cookie must carry exact Path=/; got: {cookie}"
+        );
         let body = res.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["success"], true);
@@ -457,6 +504,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Any ".." segment in the static path is rejected before lookup. Embedded
+    /// assets cannot traverse, but debug builds serve from the filesystem.
+    #[tokio::test]
+    async fn static_dotdot_segment_is_404() {
+        let (app, _dir) = test_app().await;
+        for path in [
+            "/static/../templates/login.html",
+            "/static/js/../../templates/login.html",
+            "/static/%2e%2e/templates/login.html",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::NOT_FOUND,
+                "traversal path {path} must be 404"
+            );
+        }
     }
 
     // ---- Session CRUD tests -----------------------------------------------
@@ -813,9 +883,9 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_length_api_key_is_rejected() {
-        // Checks that a key of different length is not length-leaked
-        // (note: subtle ct_eq short-circuits on length mismatch -- a length oracle.
-        // Harmless for fixed-64-hex keys; M5 may hash both sides. Assert rejected.)
+        // A key of a different length is rejected. Since M5 both sides are
+        // sha256-hashed before the constant-time compare, so the compare runs
+        // over equal-length digests and cannot leak the key length.
         let (app, _dir) = test_app().await;
         let res = app
             .oneshot(
@@ -1870,5 +1940,270 @@ mod tests {
             None,
         )
         .await;
+    }
+
+    // ---- M5-U3: base-path test gaps -----------------------------------------
+
+    #[tokio::test]
+    async fn base_path_static_served_under_prefix_only() {
+        let (app, _dir) = test_app_based().await;
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::get("/app/static/js/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "/app/static/... must be 200");
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ct.contains("javascript"), "app.js content-type: {ct}");
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let js = String::from_utf8_lossy(&body);
+        assert!(
+            !js.contains("__BASE_PATH__"),
+            "served JS must have zero literal __BASE_PATH__ placeholders"
+        );
+
+        // Outside the prefix the asset must not exist (Go parity).
+        let res = app
+            .oneshot(
+                Request::get("/static/js/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "/static/... outside the prefix must 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_path_share_page_is_view_only() {
+        let (app, _dir) = test_app_based().await;
+        let token = obtain_token_based(&app).await;
+
+        let create = authed_request(&app, &token, "POST", "/app/api/sessions", None).await;
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let created = body_json(create).await;
+        let sess_id = created["id"].as_str().unwrap().to_string();
+
+        let mint = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/app/api/sessions/{sess_id}/share"),
+            None,
+        )
+        .await;
+        assert_eq!(mint.status(), StatusCode::CREATED);
+        let mint_v = body_json(mint).await;
+        let share_token = mint_v["token"].as_str().unwrap().to_string();
+
+        // Public viewer page under the prefix: 200, view-only banner.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/app/s/{share_token}").as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "share page must be 200");
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(
+            html.contains("VIEW ONLY"),
+            "share page must carry the VIEW ONLY banner"
+        );
+        assert!(
+            !html.contains("__BASE_PATH__"),
+            "share page must have zero literal __BASE_PATH__ placeholders"
+        );
+
+        authed_request(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/app/api/sessions/{sess_id}"),
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn base_path_login_page_substituted() {
+        let (app, _dir) = test_app_based().await;
+        let res = app
+            .oneshot(Request::get("/app/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(
+            html.contains(r#"window.BASE_PATH = "/app""#),
+            "login page must carry the substituted base path"
+        );
+        assert!(
+            !html.contains("__BASE_PATH__"),
+            "login page must have zero literal __BASE_PATH__ placeholders"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_path_unauth_api_is_401_json() {
+        let (app, _dir) = test_app_based().await;
+        let res = app
+            .oneshot(
+                Request::get("/app/api/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let v = body_json(res).await;
+        assert_eq!(v, serde_json::json!({"error": "unauthorized"}));
+    }
+
+    // ---- M5-U3: CORS (Go parity: corsMiddleware wraps the outermost mux) ----
+
+    #[tokio::test]
+    async fn cors_preflight_204_with_headers() {
+        let (app, _dir) = test_app().await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/health")
+                    .header(header::ORIGIN, "http://example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            res.headers().get("Access-Control-Allow-Origin").unwrap(),
+            "http://example.com",
+            "ACAO must reflect the Origin"
+        );
+        assert_eq!(
+            res.headers().get("Access-Control-Allow-Methods").unwrap(),
+            "GET, POST, PUT, DELETE, OPTIONS"
+        );
+        assert_eq!(
+            res.headers().get("Access-Control-Allow-Headers").unwrap(),
+            "Content-Type, X-Session-Token"
+        );
+        assert_eq!(res.headers().get("Access-Control-Max-Age").unwrap(), "3600");
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty(), "preflight body must be empty");
+    }
+
+    #[tokio::test]
+    async fn cors_get_with_origin_reflects_acao() {
+        let (app, _dir) = test_app().await;
+        let res = app
+            .oneshot(
+                Request::get("/api/health")
+                    .header(header::ORIGIN, "http://x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get("Access-Control-Allow-Origin").unwrap(),
+            "http://x"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_get_without_origin_has_no_acao() {
+        let (app, _dir) = test_app().await;
+        let res = app
+            .oneshot(Request::get("/api/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers().get("Access-Control-Allow-Origin").is_none(),
+            "no Origin -> no ACAO header"
+        );
+    }
+
+    /// Go returns 204 for ANY OPTIONS request, with or without an Origin, on
+    /// matched and unmatched paths alike (the middleware wraps everything).
+    #[tokio::test]
+    async fn cors_options_always_204() {
+        let (app, _dir) = test_app().await;
+        for uri in ["/api/health", "/s/sometoken", "/definitely/not/a/route"] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("OPTIONS")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::NO_CONTENT,
+                "OPTIONS {uri} must be 204 even without Origin"
+            );
+            assert!(
+                res.headers().get("Access-Control-Allow-Origin").is_none(),
+                "no Origin -> no ACAO header on OPTIONS {uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_options_under_base_path_204() {
+        let (app, _dir) = test_app_based().await;
+        // Nested route, the bare-prefix 301 route, and a public share route:
+        // CORS wraps the outermost router so all of them preflight to 204.
+        for uri in ["/app/api/health", "/app", "/app/s/sometoken"] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("OPTIONS")
+                        .uri(uri)
+                        .header(header::ORIGIN, "http://example.com")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::NO_CONTENT,
+                "OPTIONS {uri} must be 204 under the base path"
+            );
+            assert_eq!(
+                res.headers().get("Access-Control-Allow-Origin").unwrap(),
+                "http://example.com",
+                "ACAO must reflect the Origin on OPTIONS {uri}"
+            );
+        }
     }
 }
