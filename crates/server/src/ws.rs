@@ -180,10 +180,29 @@ pub async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf, read
                                         (msg.cols, msg.rows);
                                 }
                                 "paste-image" => {
-                                    tracing::debug!(
-                                        "paste-image deferred to M5 (mime={})",
-                                        msg.mime
-                                    );
+                                    // Go StdEncoding = standard alphabet, padded.
+                                    // Errors never disconnect: log and keep pumping.
+                                    match base64::Engine::decode(
+                                        &base64::engine::general_purpose::STANDARD,
+                                        &msg.data,
+                                    ) {
+                                        Ok(img) => {
+                                            if let Err(e) =
+                                                sess.paste_image(&img, &msg.mime, &data_dir).await
+                                            {
+                                                tracing::warn!(
+                                                    "session {}: paste image failed: {e}",
+                                                    sess.id
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "session {}: bad paste-image data: {e}",
+                                                sess.id
+                                            );
+                                        }
+                                    }
                                 }
                                 _ => {
                                     // Unknown type — ignore.
@@ -746,6 +765,154 @@ mod tests {
             .expect("send input");
         let found = wait_for_output(&mut stream, "BASEPATH_WS", Duration::from_secs(10)).await;
         assert!(found, "expected BASEPATH_WS in output frames within 10s");
+
+        sink.send(TungsteniteMessage::Close(None)).await.ok();
+        state.manager.delete(&id).await.ok();
+    }
+
+    // ---- M5 U2: image paste --------------------------------------------------
+
+    /// The WS paste path reads the real process env; a desktop test host would
+    /// take the clipboard branch, so drop the display vars to force the file
+    /// fallback (pure reads — and thus a no-op — on headless CI).
+    fn force_no_display() {
+        for key in ["WAYLAND_DISPLAY", "DISPLAY"] {
+            if std::env::var_os(key).is_some() {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    /// paste-image frame, no display available: file lands under
+    /// `<data_dir>/<id>/pastes/`, bytes match the decoded payload, and the
+    /// absolute path is typed into the pane.
+    #[tokio::test]
+    async fn ws_paste_image_falls_back_to_file() {
+        force_no_display();
+        let (addr, state, dir) = spawn_server().await;
+
+        let sess = state.manager.create(None).await.expect("create session");
+        let id = sess.id.clone();
+
+        let expires = crate::handlers::unix_now() + 3600;
+        state
+            .store
+            .add_auth_session("wspastetoken", expires)
+            .unwrap();
+
+        let url = format!("ws://{addr}/ws/{id}?token=wspastetoken");
+        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("WS connect");
+        let (mut sink, mut stream) = ws.split();
+
+        // Drain the snapshot frame; give the shell a moment to come up.
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .ok();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let payload: &[u8] = b"\x89PNG\r\n\x1a\nws-paste-payload";
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload);
+        let frame = serde_json::json!({"type": "paste-image", "data": b64, "mime": "image/png"})
+            .to_string();
+        sink.send(TungsteniteMessage::Text(frame))
+            .await
+            .expect("send paste-image");
+
+        // Poll until the fallback file appears.
+        let pastes = dir.path().join(&id).join("pastes");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut saved: Option<std::path::PathBuf> = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(entries) = std::fs::read_dir(&pastes) {
+                if let Some(entry) = entries.flatten().next() {
+                    saved = Some(entry.path());
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let path = saved.expect("a file must appear under pastes/ within 10s");
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".png"),
+            "image/png must map to .png: {path:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            payload,
+            "saved bytes must equal the decoded payload"
+        );
+
+        // The absolute path was typed into the pty — visible via capture-pane.
+        let needle = std::path::absolute(&path).unwrap().display().to_string();
+        let tmux_name = tmux::session_name(&id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(bytes) = tmux::capture_pane(dir.path(), &tmux_name, 50).await {
+                if String::from_utf8_lossy(&bytes).contains(&needle) {
+                    found = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(found, "pane must contain the typed absolute path {needle}");
+
+        sink.send(TungsteniteMessage::Close(None)).await.ok();
+        state.manager.delete(&id).await.ok();
+    }
+
+    /// Bad base64 in a paste-image frame must NOT disconnect: a later input
+    /// frame still executes.
+    #[tokio::test]
+    async fn ws_paste_image_bad_base64_keeps_connection() {
+        let (addr, state, _dir) = spawn_server().await;
+
+        let sess = state.manager.create(None).await.expect("create session");
+        let id = sess.id.clone();
+
+        let expires = crate::handlers::unix_now() + 3600;
+        state
+            .store
+            .add_auth_session("wspastebadtoken", expires)
+            .unwrap();
+
+        let url = format!("ws://{addr}/ws/{id}?token=wspastebadtoken");
+        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("WS connect");
+        let (mut sink, mut stream) = ws.split();
+
+        // Drain the snapshot frame.
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .ok();
+
+        let frame = serde_json::json!({
+            "type": "paste-image",
+            "data": "!!!not-base64!!!",
+            "mime": "image/png"
+        })
+        .to_string();
+        sink.send(TungsteniteMessage::Text(frame))
+            .await
+            .expect("send bad paste-image");
+
+        // Connection must still be alive: a valid input frame executes.
+        let input = serde_json::json!({"type": "input", "data": "echo PASTE_ALIVE\n"}).to_string();
+        sink.send(TungsteniteMessage::Text(input))
+            .await
+            .expect("send input after bad paste");
+        let found = wait_for_output(&mut stream, "PASTE_ALIVE", Duration::from_secs(10)).await;
+        assert!(
+            found,
+            "connection must survive a bad-base64 paste-image frame"
+        );
 
         sink.send(TungsteniteMessage::Close(None)).await.ok();
         state.manager.delete(&id).await.ok();

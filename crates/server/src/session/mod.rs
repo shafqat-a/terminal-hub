@@ -1,5 +1,6 @@
 //! Session manager: metadata, viewer tracking, and CRUD over PTY-backed sessions.
 
+pub mod paste;
 pub mod pty;
 
 use std::collections::HashMap;
