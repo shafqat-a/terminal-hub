@@ -35,6 +35,7 @@ pub struct Session {
     pub last_client_disconnect: AtomicI64,
     pub viewers: AtomicUsize,
     pub pty: Arc<PtyHandle>,
+    pub closed: tokio::sync::watch::Sender<bool>,
 }
 
 impl Session {
@@ -139,6 +140,7 @@ impl Manager {
             .unwrap_or_default()
             .as_secs() as i64;
 
+        let (closed_tx, _closed_rx) = tokio::sync::watch::channel(false);
         let session = Arc::new(Session {
             id: id.clone(),
             name: Mutex::new(session_name.clone()),
@@ -147,6 +149,7 @@ impl Manager {
             last_client_disconnect: AtomicI64::new(0),
             viewers: AtomicUsize::new(0),
             pty,
+            closed: closed_tx,
         });
 
         self.sessions
@@ -206,6 +209,8 @@ impl Manager {
         tmux::kill_session(&self.data_dir, &tmux::session_name(id))
             .await
             .ok();
+        // Signal all viewers that this session has been deleted.
+        session.closed.send_replace(true);
         self.store.delete_session(id).map_err(|_| NotFound)?;
         Ok(())
     }

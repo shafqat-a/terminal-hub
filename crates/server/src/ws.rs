@@ -59,6 +59,7 @@ async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf) {
     // Subscribe BEFORE capture-pane so we cannot miss any output bytes that
     // arrive while the snapshot command is running (Go has the same order:
     // AddClient happens before Snapshot).
+    // Flip side: bytes emitted during capture appear in both snapshot and live stream — transient double-paint, self-correcting.
     let mut rx = sess.pty.output.subscribe();
 
     let (mut sink, mut stream) = socket.split();
@@ -76,7 +77,7 @@ async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf) {
                 }
                 crlf.push(b);
             }
-            let data = String::from_utf8_lossy(&crlf);
+            let data = String::from_utf8_lossy(&crlf); // Lossy = Go parity; M5 adds UTF-8 boundary buffering (spec §4.1).
             let frame = serde_json::json!({"type": "output", "data": data}).to_string();
             // 10s write timeout for the snapshot frame.
             let send_result =
@@ -98,12 +99,20 @@ async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf) {
     ping_interval.tick().await;
     let mut last_inbound = Instant::now();
 
+    // Subscribe BEFORE loop; resolves when Manager::delete signals closure.
+    let mut closed_rx = sess.closed.subscribe();
+
     loop {
         tokio::select! {
+            // Manager::delete signalled — tell the client and stop.
+            _ = closed_rx.changed() => {
+                break;
+            }
+
             // PTY output → client.
             out = rx.recv() => match out {
                 Ok(bytes) => {
-                    let data = String::from_utf8_lossy(&bytes);
+                    let data = String::from_utf8_lossy(&bytes); // Lossy = Go parity; M5 adds UTF-8 boundary buffering (spec §4.1).
                     let frame = serde_json::json!({"type": "output", "data": data}).to_string();
                     let send_result = tokio::time::timeout(
                         Duration::from_secs(10),
@@ -126,7 +135,7 @@ async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf) {
                         match serde_json::from_str::<ClientMsg>(&t) {
                             Ok(msg) => match msg.msg_type.as_str() {
                                 "input" => {
-                                    sess.pty.write(msg.data.as_bytes()).ok();
+                                    sess.pty.write(msg.data.as_bytes()).unwrap_or_else(|e| tracing::debug!("pty write failed: {e}"));
                                 }
                                 "resize" if msg.rows > 0 && msg.cols > 0 => {
                                     sess.pty.resize(msg.rows, msg.cols).ok();
@@ -149,7 +158,7 @@ async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf) {
                         }
                     }
                     Some(Ok(Message::Binary(b))) => {
-                        sess.pty.write(&b).ok();
+                        sess.pty.write(&b).unwrap_or_else(|e| tracing::debug!("pty write failed: {e}"));
                     }
                     Some(Ok(_)) => {
                         // Ping/Pong/Close — axum auto-handles pings; nothing to do.
@@ -411,5 +420,49 @@ mod tests {
             width_ok,
             "tmux window_width should become 120 after resize message"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_disconnects_viewer() {
+        let (addr, state, _dir) = spawn_server().await;
+
+        // Create a real session.
+        let sess = state.manager.create(None).await.expect("create session");
+        let id = sess.id.clone();
+
+        // Register a valid auth token.
+        let expires = crate::handlers::unix_now() + 3600;
+        state
+            .store
+            .add_auth_session("wsdeletedisconnect", expires)
+            .unwrap();
+
+        // Connect via WebSocket.
+        let url = format!("ws://{addr}/ws/{id}?token=wsdeletedisconnect");
+        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("WS connect");
+        let (_sink, mut stream) = ws.split();
+
+        // Drain the snapshot frame.
+        let _ = tokio::time::timeout(Duration::from_secs(5), stream.next()).await;
+
+        // Delete the session -- should signal all viewers to disconnect.
+        state.manager.delete(&id).await.expect("delete");
+
+        // Expect the WS stream to end (None, Err, or Close frame) within 5s.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                panic!("viewer socket did not close within 5s after session delete");
+            }
+            match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(None) | Err(_) => break, // stream ended -- pass
+                Ok(Some(Ok(TungsteniteMessage::Close(_)))) => break, // server sent Close -- pass
+                Ok(Some(Err(_))) => break,  // transport error -- pass
+                Ok(Some(Ok(_))) => continue, // Ping/Pong/Text -- keep draining
+            }
+        }
     }
 }
