@@ -112,7 +112,7 @@ pub struct NotFound;
 pub struct Manager {
     data_dir: PathBuf,
     shell: String,
-    sessions: RwLock<HashMap<String, Arc<Session>>>,
+    sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
     store: Arc<store::Store>,
 }
 
@@ -121,7 +121,7 @@ impl Manager {
         Manager {
             data_dir,
             shell,
-            sessions: RwLock::new(HashMap::new()),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
             store,
         }
     }
@@ -139,7 +139,10 @@ impl Manager {
                 continue;
             }
             // Derive id from the tmux session name: "aidc_<id>".
-            let id = tmux_name.trim_start_matches("aidc_").to_string();
+            let Some(id) = tmux_name.strip_prefix("aidc_") else {
+                continue;
+            };
+            let id = id.to_string();
 
             let pty = match PtyHandle::spawn(&self.data_dir, &tmux_name, &self.shell, 24, 80) {
                 Ok(p) => p,
@@ -188,10 +191,7 @@ impl Manager {
 
     /// Spawn the dead-detection monitor task for a session.
     fn spawn_monitor(&self, session: Arc<Session>) {
-        let sessions_ptr = &self.sessions as *const RwLock<HashMap<String, Arc<Session>>>;
-        // SAFETY: The Manager is wrapped in Arc<AppState> which lives for the
-        // lifetime of the tokio runtime; tasks are cancelled before Manager drops.
-        let sessions_ref = unsafe { &*sessions_ptr };
+        let sessions = Arc::clone(&self.sessions);
         let store = Arc::clone(&self.store);
         tokio::spawn(async move {
             let mut exited_rx = session.pty.exited_rx();
@@ -201,7 +201,7 @@ impl Manager {
                 return;
             }
             // Verify the session is still the same Arc in the map (not replaced).
-            let mut map = sessions_ref.write().await;
+            let mut map = sessions.write().await;
             let still_present = map
                 .get(&session.id)
                 .map(|s| Arc::ptr_eq(s, &session))
@@ -262,13 +262,13 @@ impl Manager {
         // Collect live session ids.
         let live_ids: std::collections::HashSet<String> = sessions.keys().cloned().collect();
 
-        // Build live session infos.
-        let mut infos: Vec<SessionInfo> = sessions
+        // Build live session infos as (unix_ts, id, SessionInfo) for sort key.
+        let mut keyed: Vec<(i64, String, SessionInfo)> = sessions
             .values()
             .map(|s| {
                 let name = s.name.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let (cols, rows) = *s.size.lock().unwrap_or_else(|e| e.into_inner());
-                SessionInfo {
+                let info = SessionInfo {
                     id: s.id.clone(),
                     name,
                     created_at: format_created_at(s.created_at),
@@ -277,7 +277,8 @@ impl Manager {
                     last_client_disconnect_at: s.last_client_disconnect.load(Ordering::Relaxed),
                     cols,
                     rows,
-                }
+                };
+                (s.created_at, s.id.clone(), info)
             })
             .collect();
 
@@ -287,21 +288,28 @@ impl Manager {
                 if live_ids.contains(&row.id) {
                     continue;
                 }
-                infos.push(SessionInfo {
-                    id: row.id,
-                    name: row.name,
-                    created_at: format_created_at(row.created_at),
-                    status: row.status,
-                    last_activity_at: row.last_activity_at,
-                    last_client_disconnect_at: row.last_client_disconnect_at,
-                    cols: row.cols as u16,
-                    rows: row.rows as u16,
-                });
+                let unix = row.created_at;
+                let id = row.id.clone();
+                keyed.push((
+                    unix,
+                    id,
+                    SessionInfo {
+                        id: row.id,
+                        name: row.name,
+                        created_at: format_created_at(row.created_at),
+                        status: row.status,
+                        last_activity_at: row.last_activity_at,
+                        last_client_disconnect_at: row.last_client_disconnect_at,
+                        cols: row.cols as u16,
+                        rows: row.rows as u16,
+                    },
+                ));
             }
         }
 
-        // Stable ordering by (created_at string, id) as tiebreaker.
-        infos.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        // Stable ordering by (created_at unix i64, id) as tiebreaker.
+        keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        let infos: Vec<SessionInfo> = keyed.into_iter().map(|(_, _, info)| info).collect();
 
         infos
     }
@@ -586,6 +594,33 @@ mod tests {
         // created_at string encodes the original timestamp.
         let expected_ca = format_created_at(sess_created_at);
         assert_eq!(info.created_at, expected_ca, "created_at must be preserved");
+
+        // Fix 5: write to the re-adopted session PTY and verify output via capture-pane.
+        {
+            let sess = mgr2
+                .get(&sess_id)
+                .await
+                .expect("session must be gettable after re-adoption");
+            // Give tmux a moment for the re-attached PTY to be ready.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            sess.pty
+                .write(b"echo ADOPT_WRITE_OK\n")
+                .expect("pty write must succeed");
+
+            let tmux_name = tmux::session_name(&sess_id);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut found = false;
+            while std::time::Instant::now() < deadline {
+                if let Ok(bytes) = tmux::capture_pane(dir.path(), &tmux_name, 50).await {
+                    if String::from_utf8_lossy(&bytes).contains("ADOPT_WRITE_OK") {
+                        found = true;
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(found, "capture_pane must contain ADOPT_WRITE_OK within 5s");
+        }
 
         // Cleanup.
         mgr2.delete(&sess_id).await.expect("delete");

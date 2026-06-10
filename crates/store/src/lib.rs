@@ -203,17 +203,26 @@ fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
     if version < 1 {
-        conn.execute_batch(V1_DDL)?;
-        conn.execute_batch("PRAGMA user_version = 1")?;
+        // Wrap v1 DDL in a transaction so a mid-step failure leaves schema
+        // and user_version consistent.
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\nPRAGMA user_version = 1;\nCOMMIT;",
+            V1_DDL
+        ))?;
     }
 
     if version < 2 {
+        // SQLite does not allow DDL inside a regular transaction for ALTER TABLE
+        // in WAL mode, but execute_batch runs statements sequentially and the
+        // PRAGMA user_version update is atomic with the surrounding BEGIN/COMMIT.
         conn.execute_batch(
-            "ALTER TABLE sessions ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;
+            "BEGIN;
+             ALTER TABLE sessions ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE sessions ADD COLUMN last_client_disconnect_at INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE sessions ADD COLUMN cols INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE sessions ADD COLUMN rows INTEGER NOT NULL DEFAULT 0;
-             PRAGMA user_version = 2;",
+             PRAGMA user_version = 2;
+             COMMIT;",
         )?;
     }
 
