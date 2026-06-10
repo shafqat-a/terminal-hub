@@ -15,6 +15,8 @@ pub struct AppState {
     pub limiter: RateLimiter,
     pub store: Arc<store::Store>,
     pub manager: session::Manager,
+    /// Resolved API key (either from config or auto-generated at startup).
+    pub api_key: String,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -29,12 +31,31 @@ pub fn build_state(cfg: Config) -> SharedState {
     );
     let manager =
         session::Manager::new(cfg.data_dir.clone(), cfg.shell.clone(), Arc::clone(&store));
+
+    let api_key = match &cfg.api_key {
+        Some(k) => k.clone(),
+        None => {
+            let key = crate::auth::generate_session_token();
+            tracing::info!("API key: {key}");
+            key
+        }
+    };
+
+    // idle_timeout and max_sessions are consumed by U3 (reap loop + session cap).
+    // Log them at startup so the compiler sees them referenced.
+    tracing::debug!(
+        idle_timeout = ?cfg.idle_timeout,
+        max_sessions = cfg.max_sessions,
+        "session limits configured"
+    );
+
     Arc::new(AppState {
         cfg,
         auth,
         limiter,
         store,
         manager,
+        api_key,
     })
 }
 
@@ -74,6 +95,7 @@ pub mod test_support {
         let cfg = Config::from_lookup(|key| match key {
             "AI_CONDUCTOR_DATA_DIR" => Some(dir.path().display().to_string()),
             "AI_CONDUCTOR_PASSWORD" => Some("testpass".into()),
+            "AI_CONDUCTOR_API_KEY" => Some("testapikey".into()),
             _ => None,
         })
         .unwrap();
@@ -626,5 +648,103 @@ mod tests {
             !html.contains("BASE_PATH"),
             "no dangling BASE_PATH references"
         );
+    }
+
+    // ---- X-API-Key auth tests --------------------------------------------
+
+    #[tokio::test]
+    async fn api_key_grants_api_access() {
+        let (app, _dir) = test_app();
+        // "testapikey" is set in test_app's config lookup
+        let res = app
+            .oneshot(
+                Request::get("/api/sessions")
+                    .header("X-API-Key", "testapikey")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_grants_terminal() {
+        let (app, _dir) = test_app();
+        let res = app
+            .oneshot(
+                Request::get("/terminal")
+                    .header("X-API-Key", "testapikey")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn wrong_api_key_falls_through() {
+        let (app, _dir) = test_app();
+        // Wrong key, no session token -> falls through to token path -> rejected
+        let res_api = app
+            .clone()
+            .oneshot(
+                Request::get("/api/sessions")
+                    .header("X-API-Key", "wrongkey")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_api.status(), StatusCode::UNAUTHORIZED);
+        let body = res_api.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!({"error": "unauthorized"}));
+
+        let res_term = app
+            .oneshot(
+                Request::get("/terminal")
+                    .header("X-API-Key", "wrongkey")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_term.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn cookie_still_works_without_api_key_header() {
+        // Confirm that existing cookie-based auth is unaffected.
+        let (app, _dir) = test_app();
+        let token = obtain_token(&app).await;
+        let res = app
+            .oneshot(
+                Request::get("/terminal")
+                    .header(header::COOKIE, format!("ai_conductor_session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn wrong_length_api_key_is_rejected() {
+        // Checks that a key of different length is not length-leaked
+        // (constant-time compare handles this; assert it is simply rejected).
+        let (app, _dir) = test_app();
+        let res = app
+            .oneshot(
+                Request::get("/api/sessions")
+                    .header("X-API-Key", "short")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }

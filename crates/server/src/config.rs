@@ -13,6 +13,12 @@ pub struct Config {
     pub login_lockout: Duration,
     /// Shell to run inside new tmux sessions.
     pub shell: String,
+    /// Optional pre-configured API key. None means generate at startup.
+    pub api_key: Option<String>,
+    /// Idle timeout for sessions. Duration::ZERO means disabled.
+    pub idle_timeout: Duration,
+    /// Maximum concurrent live sessions. 0 means unlimited.
+    pub max_sessions: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +57,14 @@ impl Config {
             })?,
         };
 
+        let max_sessions = match lookup("AI_CONDUCTOR_MAX_SESSIONS") {
+            None => 0,
+            Some(raw) => raw.parse().map_err(|_| ConfigError {
+                key: "AI_CONDUCTOR_MAX_SESSIONS",
+                message: format!("not a number: {raw}"),
+            })?,
+        };
+
         Ok(Config {
             password: lookup("AI_CONDUCTOR_PASSWORD").unwrap_or_else(|| "admin".into()),
             addr: lookup("AI_CONDUCTOR_ADDR").unwrap_or_else(|| "0.0.0.0:8080".into()),
@@ -77,6 +91,9 @@ impl Config {
             shell: lookup("AI_CONDUCTOR_SHELL")
                 .or_else(|| lookup("SHELL"))
                 .unwrap_or_else(|| "/bin/bash".into()),
+            api_key: lookup("AI_CONDUCTOR_API_KEY"),
+            idle_timeout: duration(&lookup, "AI_CONDUCTOR_IDLE_TIMEOUT", Duration::ZERO)?,
+            max_sessions,
         })
     }
 }
@@ -105,6 +122,17 @@ mod tests {
         assert_eq!(cfg.pid_file, None);
         // empty lookup: SHELL not set either, falls back to /bin/bash
         assert_eq!(cfg.shell, "/bin/bash");
+        // new fields: defaults
+        assert_eq!(cfg.api_key, None, "api_key should default to None");
+        assert_eq!(
+            cfg.idle_timeout,
+            std::time::Duration::ZERO,
+            "idle_timeout should default to zero (disabled)"
+        );
+        assert_eq!(
+            cfg.max_sessions, 0,
+            "max_sessions should default to 0 (unlimited)"
+        );
     }
 
     #[test]
@@ -116,6 +144,9 @@ mod tests {
                 "AI_CONDUCTOR_SESSION_TIMEOUT" => Some("2h".into()),
                 "AI_CONDUCTOR_LOGIN_MAX_ATTEMPTS" => Some("0".into()),
                 "AI_CONDUCTOR_PID_FILE" => Some("/tmp/c.pid".into()),
+                "AI_CONDUCTOR_API_KEY" => Some("myapikey".into()),
+                "AI_CONDUCTOR_IDLE_TIMEOUT" => Some("30m".into()),
+                "AI_CONDUCTOR_MAX_SESSIONS" => Some("10".into()),
                 _ => None,
             }
         };
@@ -125,6 +156,13 @@ mod tests {
         assert_eq!(cfg.session_timeout, std::time::Duration::from_secs(7200));
         assert_eq!(cfg.login_max_attempts, 0);
         assert_eq!(cfg.pid_file, Some(std::path::PathBuf::from("/tmp/c.pid")));
+        assert_eq!(cfg.api_key, Some("myapikey".into()));
+        assert_eq!(
+            cfg.idle_timeout,
+            std::time::Duration::from_secs(30 * 60),
+            "idle_timeout must parse humantime"
+        );
+        assert_eq!(cfg.max_sessions, 10);
     }
 
     #[test]
@@ -148,6 +186,22 @@ mod tests {
     fn invalid_duration_is_an_error() {
         let lookup = |key: &str| -> Option<String> {
             (key == "AI_CONDUCTOR_SESSION_TIMEOUT").then(|| "notaduration".to_string())
+        };
+        assert!(Config::from_lookup(lookup).is_err());
+    }
+
+    #[test]
+    fn invalid_max_sessions_is_an_error() {
+        let lookup = |key: &str| -> Option<String> {
+            (key == "AI_CONDUCTOR_MAX_SESSIONS").then(|| "notanumber".to_string())
+        };
+        assert!(Config::from_lookup(lookup).is_err());
+    }
+
+    #[test]
+    fn invalid_idle_timeout_is_an_error() {
+        let lookup = |key: &str| -> Option<String> {
+            (key == "AI_CONDUCTOR_IDLE_TIMEOUT").then(|| "notaduration".to_string())
         };
         assert!(Config::from_lookup(lookup).is_err());
     }

@@ -1,10 +1,11 @@
 //! Session-token gate. Token lookup order (Go parity):
-//! X-Session-Token header -> ?token= query param -> cookie.
+//! X-API-Key header (constant-time compare) -> X-Session-Token header -> ?token= query param -> cookie.
 
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
+use subtle::ConstantTimeEq;
 
 use super::COOKIE_NAME;
 use crate::app::SharedState;
@@ -50,6 +51,17 @@ fn is_api_request(req: &Request) -> bool {
 }
 
 pub async fn require_auth(State(state): State<SharedState>, req: Request, next: Next) -> Response {
+    // Check X-API-Key first (Go parity: API key auth takes precedence).
+    if let Some(provided) = req.headers().get("X-API-Key").and_then(|v| v.to_str().ok()) {
+        if !provided.is_empty() {
+            let key_match = provided.as_bytes().ct_eq(state.api_key.as_bytes()).into();
+            if key_match {
+                return next.run(req).await;
+            }
+            // Mismatch: fall through to token path (Go parity).
+        }
+    }
+
     let now = crate::handlers::unix_now();
     let valid = token_from_request(&req)
         .map(|t| state.store.validate_auth_session(&t, now).unwrap_or(false))
