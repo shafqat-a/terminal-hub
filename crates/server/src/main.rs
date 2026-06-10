@@ -49,7 +49,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("cannot bind");
-    tracing::info!("ai-dev-conductor listening on {addr}");
+    tracing::info!("terminal-hub listening on {addr}");
 
     // Graceful shutdown (Go parity, spec §6): SIGTERM/SIGINT → stop accepting,
     // let in-flight requests finish, then exit 0. Nothing in this path kills
