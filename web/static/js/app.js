@@ -45,6 +45,61 @@ const THEMES = {
             brightCyan: '#8fbcbb', brightWhite: '#eceff4',
         },
     },
+    gruvboxDark: {
+        label: 'Gruvbox Dark',
+        bg: '#282828', panel: '#3c3836', border: '#504945', accent: '#fabd2f', text: '#ebdbb2',
+        xterm: {
+            background: '#282828', foreground: '#ebdbb2', cursor: '#ebdbb2', selectionBackground: '#504945',
+            black: '#282828', red: '#cc241d', green: '#98971a', yellow: '#d79921', blue: '#458588',
+            magenta: '#b16286', cyan: '#689d6a', white: '#a89984', brightBlack: '#928374', brightRed: '#fb4934',
+            brightGreen: '#b8bb26', brightYellow: '#fabd2f', brightBlue: '#83a598', brightMagenta: '#d3869b',
+            brightCyan: '#8ec07c', brightWhite: '#ebdbb2',
+        },
+    },
+    nord: {
+        label: 'Nord',
+        bg: '#2e3440', panel: '#3b4252', border: '#4c566a', accent: '#88c0d0', text: '#d8dee9',
+        xterm: {
+            background: '#2e3440', foreground: '#d8dee9', cursor: '#d8dee9', selectionBackground: '#434c5e',
+            black: '#3b4252', red: '#bf616a', green: '#a3be8c', yellow: '#ebcb8b', blue: '#81a1c1',
+            magenta: '#b48ead', cyan: '#88c0d0', white: '#e5e9f0', brightBlack: '#4c566a', brightRed: '#bf616a',
+            brightGreen: '#a3be8c', brightYellow: '#ebcb8b', brightBlue: '#81a1c1', brightMagenta: '#b48ead',
+            brightCyan: '#8fbcbb', brightWhite: '#eceff4',
+        },
+    },
+    catppuccinMocha: {
+        label: 'Catppuccin Mocha',
+        bg: '#1e1e2e', panel: '#181825', border: '#313244', accent: '#cba6f7', text: '#cdd6f4',
+        xterm: {
+            background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc', selectionBackground: '#45475a',
+            black: '#45475a', red: '#f38ba8', green: '#a6e3a1', yellow: '#f9e2af', blue: '#89b4fa',
+            magenta: '#f5c2e7', cyan: '#94e2d5', white: '#bac2de', brightBlack: '#585b70', brightRed: '#f38ba8',
+            brightGreen: '#a6e3a1', brightYellow: '#f9e2af', brightBlue: '#89b4fa', brightMagenta: '#f5c2e7',
+            brightCyan: '#94e2d5', brightWhite: '#a6adc8',
+        },
+    },
+    oneDark: {
+        label: 'One Dark',
+        bg: '#282c34', panel: '#21252b', border: '#3e4451', accent: '#61afef', text: '#abb2bf',
+        xterm: {
+            background: '#282c34', foreground: '#abb2bf', cursor: '#abb2bf', selectionBackground: '#3e4451',
+            black: '#282c34', red: '#e06c75', green: '#98c379', yellow: '#e5c07b', blue: '#61afef',
+            magenta: '#c678dd', cyan: '#56b6c2', white: '#abb2bf', brightBlack: '#5c6370', brightRed: '#e06c75',
+            brightGreen: '#98c379', brightYellow: '#d19a66', brightBlue: '#61afef', brightMagenta: '#c678dd',
+            brightCyan: '#56b6c2', brightWhite: '#ffffff',
+        },
+    },
+    monokai: {
+        label: 'Monokai',
+        bg: '#272822', panel: '#1e1f1c', border: '#49483e', accent: '#a6e22e', text: '#f8f8f2',
+        xterm: {
+            background: '#272822', foreground: '#f8f8f2', cursor: '#f8f8f2', selectionBackground: '#49483e',
+            black: '#272822', red: '#f92672', green: '#a6e22e', yellow: '#e6db74', blue: '#66d9ef',
+            magenta: '#ae81ff', cyan: '#a1efe4', white: '#f8f8f2', brightBlack: '#75715e', brightRed: '#f92672',
+            brightGreen: '#a6e22e', brightYellow: '#e6db74', brightBlue: '#66d9ef', brightMagenta: '#ae81ff',
+            brightCyan: '#a1efe4', brightWhite: '#f9f8f5',
+        },
+    },
 };
 
 const FONT_FAMILY = "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace";
