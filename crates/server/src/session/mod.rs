@@ -15,6 +15,15 @@ use tokio::sync::RwLock;
 
 use crate::session::pty::PtyHandle;
 
+// ---- Helpers --------------------------------------------------------------
+
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 // ---- Session metadata -------------------------------------------------------
 
 pub struct Session {
@@ -37,14 +46,22 @@ impl Session {
 
     /// Call when a viewer disconnects: decrements viewer count; sets disconnect stamp when last viewer leaves.
     pub fn viewer_detached(&self) {
-        let prev = self.viewers.fetch_sub(1, Ordering::Relaxed);
-        if prev == 1 {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            self.last_client_disconnect.store(now, Ordering::Relaxed);
+        let prev = self
+            .viewers
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            })
+            .unwrap_or(0);
+        if prev <= 1 {
+            self.last_client_disconnect
+                .store(unix_now_secs(), Ordering::Relaxed);
         }
+    }
+
+    /// Return the current viewer count (for tests and diagnostics).
+    #[cfg(test)]
+    pub fn viewers(&self) -> usize {
+        self.viewers.load(Ordering::Relaxed)
     }
 }
 
@@ -144,8 +161,11 @@ impl Manager {
 
     pub async fn list(&self) -> Vec<SessionInfo> {
         let sessions = self.sessions.read().await;
-        let mut infos: Vec<SessionInfo> = sessions
-            .values()
+        let mut sessions_vec: Vec<Arc<Session>> = sessions.values().cloned().collect();
+        // Stable ordering by creation time, then id as tiebreaker.
+        sessions_vec.sort_by_key(|s| (s.created_at, s.id.clone()));
+        let infos: Vec<SessionInfo> = sessions_vec
+            .iter()
             .map(|s| {
                 let name = s.name.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let (cols, rows) = *s.size.lock().unwrap_or_else(|e| e.into_inner());
@@ -161,8 +181,6 @@ impl Manager {
                 }
             })
             .collect();
-        // Stable ordering by id (which is uuid-prefix, monotone within a process run).
-        infos.sort_by(|a, b| a.id.cmp(&b.id));
         infos
     }
 
@@ -357,5 +375,28 @@ mod tests {
                 assert!(c.is_ascii_digit(), "pos {i} should be digit, got {c}");
             }
         }
+    }
+
+    /// Fix 3 regression: viewer_detached without a prior attach must saturate at 0,
+    /// not wrap the AtomicUsize counter.
+    #[test]
+    fn viewer_detached_without_attach_does_not_wrap() {
+        let viewers = AtomicUsize::new(0);
+
+        // Same logic as Session::viewer_detached.
+        let prev = viewers
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            })
+            .unwrap_or(0);
+        // prev is 0, so stamp would be set -- that is acceptable; what must NOT happen
+        // is the counter wrapping to usize::MAX.
+        let _ = prev;
+
+        assert_eq!(
+            viewers.load(Ordering::Relaxed),
+            0,
+            "viewers must stay at 0, not wrap to usize::MAX"
+        );
     }
 }

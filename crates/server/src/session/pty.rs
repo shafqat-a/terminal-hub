@@ -136,6 +136,9 @@ impl PtyHandle {
     pub fn detach(&self) {
         let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
         child.kill().ok();
+        // Reap: kill() doesnt wait, and std Child doesnt reap on drop --
+        // without this every detach leaves a zombie until server exit.
+        child.wait().ok();
     }
 }
 
