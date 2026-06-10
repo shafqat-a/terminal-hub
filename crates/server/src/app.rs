@@ -97,6 +97,9 @@ pub fn build_app(state: SharedState) -> Router {
         .route("/static/*path", get(crate::assets::static_file))
         .route("/api/health", get(handlers::health))
         .route("/api/login", post(handlers::login))
+        // Public share viewer routes (no auth required — registered outside protected router).
+        .route("/s/:token", get(shares::share_page))
+        .route("/ws/share/:token", get(crate::ws::ws_share))
         .merge(protected)
         .with_state(state)
 }

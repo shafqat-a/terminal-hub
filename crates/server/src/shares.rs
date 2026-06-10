@@ -182,3 +182,28 @@ pub async fn revoke_share(
         }
     }
 }
+
+/// GET /s/:token — Public share viewer page (no auth required).
+///
+/// Redeems the token: valid → 200 share.html; invalid/expired/revoked → 404 share_invalid.html.
+/// No detail leakage: both states return an HTML page (not JSON), and the
+/// 404 page does not reveal whether the token ever existed.
+pub async fn share_page(State(state): State<SharedState>, Path(token): Path<String>) -> Response {
+    let hash = token_hash(&token);
+    let now = share_unix_now();
+
+    if state
+        .store
+        .redeem_share(&hash, now)
+        .unwrap_or(None)
+        .is_some()
+    {
+        crate::assets::serve_substituted("templates/share.html", "", axum::http::StatusCode::OK)
+    } else {
+        crate::assets::serve_substituted(
+            "templates/share_invalid.html",
+            "",
+            axum::http::StatusCode::NOT_FOUND,
+        )
+    }
+}

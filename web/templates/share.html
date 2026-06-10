@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shared session — AI Dev Conductor</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+    <link rel="stylesheet" href="__BASE_PATH__/static/css/style.css">
+    <script>window.BASE_PATH = "__BASE_PATH__";</script>
+    <style>
+        body { margin: 0; }
+        .share-page { display: flex; flex-direction: column; height: 100vh; background: var(--bg, #1a1b26); }
+        .share-banner {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px 14px; font: 600 13px/1.2 system-ui, sans-serif;
+            color: #1a1b26; background: #e0af68; flex: 0 0 auto;
+        }
+        .share-banner .dot { width: 8px; height: 8px; border-radius: 50%; background: #1a1b26; }
+        .share-banner .spacer { flex: 1; }
+        .share-banner .status { font-weight: 500; opacity: 0.8; }
+        #share-terminal { flex: 1 1 auto; min-height: 0; padding: 6px; }
+    </style>
+</head>
+<body>
+    <div class="share-page">
+        <div class="share-banner">
+            <span class="dot"></span>
+            <span>VIEW ONLY — you are watching a shared terminal. Input is disabled.</span>
+            <span class="spacer"></span>
+            <span class="status" id="share-status">connecting…</span>
+        </div>
+        <div id="share-terminal"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+    <script src="__BASE_PATH__/static/js/share.js"></script>
+</body>
+</html>
