@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, State};
@@ -10,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::app::SharedState;
 use crate::auth;
+use crate::util::unix_now;
 
 pub async fn health() -> Json<Value> {
     Json(json!({"status": "ok"}))
@@ -33,13 +33,6 @@ pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
 
 pub(crate) fn json_error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({"error": message}))).into_response()
-}
-
-pub(crate) fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock predates Unix epoch")
-        .as_secs() as i64
 }
 
 pub async fn login(

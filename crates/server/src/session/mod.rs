@@ -272,9 +272,24 @@ impl Manager {
                 loop {
                     ticker.tick().await;
                     let now = unix_now_secs();
-                    let idle_secs = idle_timeout.as_secs() as i64;
+                    // Idle bookkeeping is in whole unix seconds (Go compares
+                    // nanosecond stamps), so a configured timeout in (0, 1s)
+                    // would truncate to 0 and reap on any second-boundary
+                    // crossing — clamp the effective timeout to 1s instead.
+                    // Sub-second timeouts therefore behave as 1s (documented
+                    // divergence from Go's exact sub-second reaping).
+                    let idle_secs = (idle_timeout.as_secs() as i64).max(1);
 
                     // Collect victims: viewers == 0 AND idle basis older than idle_timeout.
+                    //
+                    // TOCTOU: a viewer can attach between this selection (under
+                    // the read lock) and the kill in delete_session_by_id below.
+                    // Accepted, matching Go (reapOnce collects victim ids under
+                    // RLock, then Deletes them lock-free): the window is a
+                    // single loop iteration, it only affects a session that was
+                    // already idle past the timeout, and the worst case is one
+                    // just-attached viewer seeing its session close — the
+                    // client simply creates a new session.
                     let victims: Vec<String> = {
                         let map = sessions.read().await;
                         map.values()
@@ -894,6 +909,47 @@ mod tests {
         }
         assert!(reaped, "idle session must be reaped within 8s");
         // tmux session must also be gone.
+        assert!(
+            !tmux::has_session(dir.path(), &tmux_name).await,
+            "tmux session must be killed by reaper"
+        );
+    }
+
+    /// Sub-second idle_timeout (0 < t < reaper tick resolution) is clamped to
+    /// 1s of effective idle and still reaps — never disabled, never instant.
+    #[tokio::test]
+    async fn reap_subsecond_idle_timeout() {
+        let dir = tempdir().unwrap();
+        let store =
+            Arc::new(store::Store::open(&dir.path().join("conductor.db")).expect("store open"));
+        let mgr = Manager::new(
+            dir.path().to_path_buf(),
+            "/bin/sh".into(),
+            Arc::clone(&store),
+            Duration::from_millis(500), // sub-second idle_timeout
+            0,
+            Duration::from_millis(100),
+        );
+        mgr.init().await;
+
+        let sess = mgr.create(None).await.expect("create");
+        let id = sess.id.clone();
+        let tmux_name = tmux::session_name(&id);
+
+        // Never attach -- poll list() until empty (≤8s).
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut reaped = false;
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if mgr.list().await.is_empty() {
+                reaped = true;
+                break;
+            }
+        }
+        assert!(
+            reaped,
+            "sub-second idle_timeout must still reap (clamped to 1s)"
+        );
         assert!(
             !tmux::has_session(dir.path(), &tmux_name).await,
             "tmux session must be killed by reaper"

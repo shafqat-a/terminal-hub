@@ -635,7 +635,7 @@ mod tests {
     ) {
         let sess = state.manager.create(None).await.expect("create session");
         let id = sess.id.clone();
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state.store.add_auth_session(token, expires).unwrap();
         let url = format!("ws://{addr}/ws/{id}?token={token}");
         let (ws, _resp) = tokio_tungstenite::connect_async(&url)
@@ -664,7 +664,7 @@ mod tests {
     #[tokio::test]
     async fn ws_unknown_session_is_404() {
         let (addr, state, _dir) = spawn_server().await;
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state.store.add_auth_session("wstoken404", expires).unwrap();
 
         let url = format!("ws://{addr}/ws/zzzzzzzz?token=wstoken404");
@@ -699,7 +699,7 @@ mod tests {
         let id = sess.id.clone();
 
         // Register a valid auth token.
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state.store.add_auth_session("wse2etoken", expires).unwrap();
 
         // Connect via WebSocket.
@@ -778,7 +778,7 @@ mod tests {
         let id = sess.id.clone();
         let tmux_name = tmux::session_name(&id);
 
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state
             .store
             .add_auth_session("wsresizetoken", expires)
@@ -842,7 +842,7 @@ mod tests {
         let id = sess.id.clone();
 
         // Register a valid auth token.
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state
             .store
             .add_auth_session("wsdeletedisconnect", expires)
@@ -1066,7 +1066,7 @@ mod tests {
         let sess = state.manager.create(None).await.expect("create session");
         let id = sess.id.clone();
 
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state
             .store
             .add_auth_session("wsbasetoken", expires)
@@ -1171,7 +1171,7 @@ mod tests {
         }
 
         // NEW connection: snapshot frame first, then the mode re-assert frame.
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state
             .store
             .add_auth_session("wsmodereplay", expires)
@@ -1524,7 +1524,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state
             .store
             .add_auth_session("wslagresync", expires)
@@ -1590,7 +1590,7 @@ mod tests {
         let sess = state.manager.create(None).await.expect("create session");
         let id = sess.id.clone();
 
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state
             .store
             .add_auth_session("wspastetoken", expires)
@@ -1672,7 +1672,7 @@ mod tests {
         let sess = state.manager.create(None).await.expect("create session");
         let id = sess.id.clone();
 
-        let expires = crate::handlers::unix_now() + 3600;
+        let expires = crate::util::unix_now() + 3600;
         state
             .store
             .add_auth_session("wspastebadtoken", expires)
