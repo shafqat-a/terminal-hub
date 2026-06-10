@@ -734,7 +734,8 @@ mod tests {
     #[tokio::test]
     async fn wrong_length_api_key_is_rejected() {
         // Checks that a key of different length is not length-leaked
-        // (constant-time compare handles this; assert it is simply rejected).
+        // (note: subtle ct_eq short-circuits on length mismatch — a length oracle.
+        // Harmless for fixed-64-hex keys; M5 may hash both sides. Assert rejected.)
         let (app, _dir) = test_app();
         let res = app
             .oneshot(
