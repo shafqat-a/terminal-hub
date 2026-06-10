@@ -687,6 +687,12 @@ mod tests {
             .unwrap();
         let result = store.redeem_share(&hash, 2001).unwrap();
         assert!(result.is_none(), "expired share must not redeem");
+        // Boundary: expires_at == now is also rejected (strict >, Go parity).
+        let at_boundary = store.redeem_share(&hash, 2000).unwrap();
+        assert!(
+            at_boundary.is_none(),
+            "share at exact expiry must not redeem"
+        );
     }
 
     #[test]
