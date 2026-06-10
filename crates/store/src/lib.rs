@@ -1,5 +1,5 @@
 //! rusqlite-backed persistence for ai-dev-conductor.
-//! M1: auth sessions only. M2: terminal sessions table.
+//! M1: auth sessions only. M2: terminal sessions table. M3: versioned migrations + lifecycle.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -15,12 +15,27 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
 }
 
+/// A fully-typed row returned by get_session / list_sessions.
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub status: String,
+    pub last_activity_at: i64,
+    pub last_client_disconnect_at: i64,
+    pub cols: i64,
+    pub rows: i64,
+}
+
 #[derive(Debug)]
 pub struct Store {
     pub(crate) conn: Mutex<Connection>,
 }
 
-const MIGRATIONS: &str = "
+// ---- V1 DDL (does NOT include v2 columns, so the ALTER TABLE path is the
+//              only way they are added -- keeping both paths schema-identical).
+const V1_DDL: &str = "
 CREATE TABLE IF NOT EXISTS auth_sessions (
     token_hash TEXT PRIMARY KEY,
     expires_at INTEGER NOT NULL
@@ -44,7 +59,7 @@ impl Store {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch(MIGRATIONS)?;
+        run_migrations(&conn)?;
         Ok(Store {
             conn: Mutex::new(conn),
         })
@@ -99,26 +114,110 @@ impl Store {
         Ok(rows > 0)
     }
 
-    /// List all sessions ordered by `created_at` ascending.
-    /// Returns tuples of (id, name, created_at, status).
-    pub fn list_sessions(&self) -> Result<Vec<(String, String, i64, String)>, StoreError> {
+    /// Set the status of a session row.
+    pub fn set_status(&self, id: &str, status: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt =
-            conn.prepare("SELECT id, name, created_at, status FROM sessions ORDER BY created_at")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
+        conn.execute(
+            "UPDATE sessions SET status = ?1 WHERE id = ?2",
+            params![status, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update `last_activity_at` for a session.
+    pub fn set_activity(&self, id: &str, unix: i64) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE sessions SET last_activity_at = ?1 WHERE id = ?2",
+            params![unix, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update `cols` and `rows` for a session.
+    pub fn set_size(&self, id: &str, cols: i64, rows: i64) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE sessions SET cols = ?1, rows = ?2 WHERE id = ?3",
+            params![cols, rows, id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark every 'running' session as 'detached' (called on startup before re-adoption).
+    pub fn mark_all_detached(&self) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE sessions SET status = 'detached' WHERE status = 'running'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch a single session row by id.
+    pub fn get_session(&self, id: &str) -> Result<Option<SessionRow>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, name, created_at, status, last_activity_at, last_client_disconnect_at, cols, rows \
+             FROM sessions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], map_session_row)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// List all sessions ordered by (created_at, id).
+    pub fn list_sessions(&self) -> Result<Vec<SessionRow>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT id, name, created_at, status, last_activity_at, last_client_disconnect_at, cols, rows \
+             FROM sessions ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([], map_session_row)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
         }
         Ok(out)
     }
+}
+
+fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
+    Ok(SessionRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        created_at: row.get(2)?,
+        status: row.get(3)?,
+        last_activity_at: row.get(4)?,
+        last_client_disconnect_at: row.get(5)?,
+        cols: row.get(6)?,
+        rows: row.get(7)?,
+    })
+}
+
+// ---- Versioned migration runner ----
+
+fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+
+    if version < 1 {
+        conn.execute_batch(V1_DDL)?;
+        conn.execute_batch("PRAGMA user_version = 1")?;
+    }
+
+    if version < 2 {
+        conn.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN last_client_disconnect_at INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN cols INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN rows INTEGER NOT NULL DEFAULT 0;
+             PRAGMA user_version = 2;",
+        )?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -189,11 +288,15 @@ mod tests {
             .unwrap();
         let list = store.list_sessions().unwrap();
         assert_eq!(list.len(), 1);
-        let (id, name, created_at, status) = &list[0];
-        assert_eq!(id, "aabbccdd");
-        assert_eq!(name, "my-session");
-        assert_eq!(*created_at, 1_000_000);
-        assert_eq!(status, "running");
+        let row = &list[0];
+        assert_eq!(row.id, "aabbccdd");
+        assert_eq!(row.name, "my-session");
+        assert_eq!(row.created_at, 1_000_000);
+        assert_eq!(row.status, "running");
+        assert_eq!(row.last_activity_at, 0);
+        assert_eq!(row.last_client_disconnect_at, 0);
+        assert_eq!(row.cols, 0);
+        assert_eq!(row.rows, 0);
     }
 
     #[test]
@@ -205,7 +308,7 @@ mod tests {
         let found = store.rename_session("aabbccdd", "new-name").unwrap();
         assert!(found);
         let list = store.list_sessions().unwrap();
-        assert_eq!(list[0].1, "new-name");
+        assert_eq!(list[0].name, "new-name");
     }
 
     #[test]
@@ -243,7 +346,7 @@ mod tests {
             let store = Store::open(&path).unwrap();
             let list = store.list_sessions().unwrap();
             assert_eq!(list.len(), 1);
-            assert_eq!(list[0].0, "aabbccdd");
+            assert_eq!(list[0].id, "aabbccdd");
         }
     }
 
@@ -258,7 +361,131 @@ mod tests {
             .unwrap();
         let list = store.list_sessions().unwrap();
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].0, "aaaaaaaa");
-        assert_eq!(list[1].0, "bbbbbbbb");
+        assert_eq!(list[0].id, "aaaaaaaa");
+        assert_eq!(list[1].id, "bbbbbbbb");
+    }
+
+    #[test]
+    fn set_status_updates_row() {
+        let (store, _d) = open_temp();
+        store.upsert_session("aabbccdd", "sess", 1_000_000).unwrap();
+        store.set_status("aabbccdd", "detached").unwrap();
+        let row = store.get_session("aabbccdd").unwrap().unwrap();
+        assert_eq!(row.status, "detached");
+    }
+
+    #[test]
+    fn set_activity_updates_row() {
+        let (store, _d) = open_temp();
+        store.upsert_session("aabbccdd", "sess", 1_000_000).unwrap();
+        store.set_activity("aabbccdd", 9_999_999).unwrap();
+        let row = store.get_session("aabbccdd").unwrap().unwrap();
+        assert_eq!(row.last_activity_at, 9_999_999);
+    }
+
+    #[test]
+    fn set_size_updates_row() {
+        let (store, _d) = open_temp();
+        store.upsert_session("aabbccdd", "sess", 1_000_000).unwrap();
+        store.set_size("aabbccdd", 120, 40).unwrap();
+        let row = store.get_session("aabbccdd").unwrap().unwrap();
+        assert_eq!(row.cols, 120);
+        assert_eq!(row.rows, 40);
+    }
+
+    #[test]
+    fn mark_all_detached_changes_running_to_detached() {
+        let (store, _d) = open_temp();
+        store.upsert_session("aaaaaaaa", "a", 1_000).unwrap();
+        store.upsert_session("bbbbbbbb", "b", 2_000).unwrap();
+        store.set_status("bbbbbbbb", "dead").unwrap();
+        store.mark_all_detached().unwrap();
+        let rows = store.list_sessions().unwrap();
+        assert_eq!(rows[0].status, "detached");
+        assert_eq!(rows[1].status, "dead");
+    }
+
+    #[test]
+    fn get_session_returns_none_for_unknown() {
+        let (store, _d) = open_temp();
+        assert!(store.get_session("nope").unwrap().is_none());
+    }
+
+    /// Key correctness test: a DB that went through the v1 path (manually
+    /// seeded) must have the same columns as a fresh DB after Store::open.
+    #[test]
+    fn v1_to_v2_upgrade_preserves_data_and_adds_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conductor.db");
+
+        // --- Simulate a v1 database (written by old code) ---
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(V1_DDL).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1").unwrap();
+            // Insert a row using only the v1 columns.
+            conn.execute(
+                "INSERT INTO sessions (id, name, created_at, status) VALUES ('aa112233', 'legacy', 42, 'running')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // --- Reopen via Store::open -- should run v1->v2 migration ---
+        let store = Store::open(&path).unwrap();
+
+        // Data must survive.
+        let row = store.get_session("aa112233").unwrap().unwrap();
+        assert_eq!(row.id, "aa112233");
+        assert_eq!(row.name, "legacy");
+        assert_eq!(row.created_at, 42);
+        assert_eq!(row.status, "running");
+        assert_eq!(row.last_activity_at, 0);
+        assert_eq!(row.last_client_disconnect_at, 0);
+        assert_eq!(row.cols, 0);
+        assert_eq!(row.rows, 0);
+
+        let ver: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 2);
+    }
+
+    /// Fresh DB and upgraded DB must have identical column names in sessions.
+    #[test]
+    fn fresh_and_upgraded_schema_are_identical() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let fresh_path = dir.path().join("fresh.db");
+        let fresh_store = Store::open(&fresh_path).unwrap();
+        let fresh_cols = table_info(&fresh_store, "sessions");
+
+        let upgrade_path = dir.path().join("upgrade.db");
+        {
+            let conn = Connection::open(&upgrade_path).unwrap();
+            conn.execute_batch(V1_DDL).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1").unwrap();
+        }
+        let upgrade_store = Store::open(&upgrade_path).unwrap();
+        let upgrade_cols = table_info(&upgrade_store, "sessions");
+
+        assert_eq!(
+            fresh_cols, upgrade_cols,
+            "fresh and upgraded sessions table columns must match"
+        );
+    }
+
+    fn table_info(store: &Store, table: &str) -> Vec<(String, String)> {
+        let conn = store.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
     }
 }

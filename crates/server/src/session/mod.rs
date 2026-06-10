@@ -251,7 +251,7 @@ mod tests {
 
         let rows = mgr.store.list_sessions().expect("list store");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, sess.id);
+        assert_eq!(rows[0].id, sess.id);
 
         mgr.delete(&sess.id).await.expect("delete");
     }
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(list[0].name, "updated");
 
         let store_rows = mgr.store.list_sessions().expect("list store");
-        assert_eq!(store_rows[0].1, "updated");
+        assert_eq!(store_rows[0].name, "updated");
 
         mgr.delete(&sess.id).await.expect("delete");
     }
