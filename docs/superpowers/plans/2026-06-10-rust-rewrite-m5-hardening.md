@@ -43,19 +43,19 @@
 
 ## Execution units
 
-### U1 — WS pump data-path hardening + §4 edge-case suite
+### - [x] U1 — WS pump data-path hardening + §4 edge-case suite
 Utf8 carry (helper with property-style unit tests: all split points of multi-byte corpus reassemble losslessly), stream-safe transform, lag→resync, mode tracker (`session/modes.rs`) + replay-on-attach/resync, resize serialization, passthrough pin tests (bracketed paste, OSC 52), §4 integration suite against real tmux (split UTF-8, alt-screen repaint, mode replay after reconnect, resize storm, combining-mark bomb, wide char/emoji at wrap).
 Commit: `feat(ws): spec §4 pump hardening — utf8 boundaries, mode replay, backpressure resync`
 
-### U2 — Image paste (conductor parity)
+### - [x] U2 — Image paste (conductor parity)
 `session/paste.rs` ported from Go paste.go (clipboard primary, file fallback, ext map); ws.rs paste-image arm: b64 decode + paste_image call (log-and-continue on errors); integration + unit tests per contract above.
 Commit: `feat(ws): image paste to clipboard with file-path fallback`
 
-### U3 — HTTP/lifecycle hardening
+### - [x] U3 — HTTP/lifecycle hardening
 Graceful shutdown; CORS layer (global, incl. nested); streaming download + Content-Disposition escaping; static_file `..` rejection; API-key double-hash compare; tower→dev-deps; unix_now relocation; TOCTOU comment; idle_timeout sub-second guard; U4 test-gap suite + cookie assertion tighten.
 Commit: `feat(server): graceful shutdown, CORS, streaming download, auth/asset hardening`
 
-### U4 — Gate + smoke + push (controller)
+### - [x] U4 — Gate + smoke + push (controller)
 1. Merge U1→U2→U3, resolve overlaps, full gate (fmt/clippy/tests), paste summaries.
 2. Parallel post-merge reviews (one per unit) — fix must-fix findings.
 3. Content-verified smoke (fresh build, exact-PID kills): SIGTERM lifecycle (session survives + re-adopts); paste-image fallback file + typed path; CORS preflight 204; emoji/UTF-8 WS round-trip; large-file download round-trip sha256; share + base-path regression spot-checks (M4 smoke subset).

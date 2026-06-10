@@ -1,32 +1,32 @@
 # RESUME — terminal-hub Rust rewrite (handoff state)
 
-**Saved:** 2026-06-10 ~16:30 +06 · **Branch:** main · **M4 COMPLETE**
-**Plans:** `docs/superpowers/plans/` (M1–M4 all ticked) · **Spec:** `docs/superpowers/specs/`
+**Saved:** 2026-06-10 ~19:00 +06 · **Branch:** main · **M5 COMPLETE**
+**Plans:** `docs/superpowers/plans/` (M1–M5 all ticked) · **Spec:** `docs/superpowers/specs/`
 
 ## Where things stand
 
-Milestones M1 (skeleton), M2 (tmux core + terminal UI), M3 (API keys/exec/history/lifecycle/reaping/re-adoption), and M4 (shares, file transfer, base path) are COMPLETE, reviewed, smoke-tested. 156 tests (122 server + 26 store + 8 tmux), fmt/clippy clean.
+M1 (skeleton), M2 (tmux core + terminal UI), M3 (API keys/exec/history/lifecycle/reaping/re-adoption), M4 (shares, file transfer, base path), M5 (hardening: spec §4 pump suite, image paste, graceful shutdown, CORS, deferred fixes) are COMPLETE, reviewed, smoke-tested. 209 tests (175 server + 26 store + 8 tmux), fmt/clippy clean.
 
-M4 was finished with parallel worktree agents (U3 + U4 simultaneously), each independently reviewed post-merge — both SOUND. One plan error was found and fixed during integration: the M4 plan over-specified share mint `path` as base_path-prefixed; Go (api/shares.go:85) returns it UN-prefixed and app.js prepends window.BASE_PATH — fixed in c41dfac, documented in code comments.
+M5 was three parallel worktree agents (U1 pump / U2 paste / U3 HTTP-lifecycle) merged by the controller. Post-merge review found two must-fix bugs in U1, both fixed in 1cefad7: (1) mode re-assert must precede the snapshot (tmux always asserts ?1049h, so after-snapshot re-assert wiped the screen on reconnect — plan text amended); (2) lag-resync must `resubscribe()` the broadcast receiver or it replays the stale buffer over the fresh snapshot.
 
-## Next: M5 (hardening) — plan not yet written
+Smoke-verified: SIGTERM exit 0 + tmux survives + restart re-adopts; paste-image fallback (file bytes + typed path in pane, via raw-WS client); CORS preflight 204 with exact Go headers; UTF-8 emoji/CJK/ZWJ exec round-trip clean; 10 MB streamed download with Content-Length and matching sha256; share page + base-path instance regressions green.
 
-Derive the M5 plan from spec §4 plus this deferred list (collected from M1–M4 reviews):
+## Next: M6 (deploy)
 
-- SIGTERM graceful-shutdown handler (systemd needs it; required before M6 deploy)
-- Reject `..` segments in assets static_file (debug builds serve from filesystem)
-- Move `tower` to dev-dependencies; relocate `unix_now()` out of handlers.rs
-- UTF-8 boundary buffering in the WS byte pump (lossy = Go parity, spec §4.1)
-- API-key compare length-oracle note (subtle ct_eq short-circuit — hash both sides if it matters)
-- TOCTOU comment in reap victim selection; sub-second idle_timeout guard
-- warp-derived edge-case test suite (spec §4)
-- **From M4 U3 review:** download streams whole file into memory (use streaming body; Go ServeFile streams + Range); Content-Disposition not %q-escaped (quote/control chars in filename → malformed header/500); upload buffers whole part in RAM (Go spills >32MiB to temp files); symlink-following inside cwd is lexical-confinement-only (matches Go, but canonicalize-then-confine is the hardening move)
-- **From M4 U4 review:** test gaps — static assets under prefix, share viewer page + /ws/share under prefix, login-page substitution under prefix, unauth-API-401 under prefix (all manually verified OK); tighten root cookie test to `Path=/;`; NO CORS layer anywhere (Go applies corsMiddleware globally — pre-existing gap, decide in M5)
+systemd unit + run.sh + deploy on Annihilator; optional .deb (adapt from legacy-terminal-hub). orion's Go production instance stays untouched until cutover. Pre-deploy notes:
+- Graceful shutdown is in (required for systemd); 15s drain bound, exit 0 on both paths.
+- **tmux server needs the xterm `Ms` terminal-override for OSC 52 clipboard forwarding** (U1 finding — without it tmux won't forward OSC 52 to clients; the test sets it explicitly).
+- Go reference: ~/git/ai-dev-conductor (feat/file-transfer), wire contracts embedded in M2–M5 plan files.
 
-## M6 (deploy) reminders
+## Backlog (deferred from M5 reviews — none blocking)
 
-systemd unit + run.sh + deploy on Annihilator; orion's Go production instance stays untouched until then. Go reference: ~/git/ai-dev-conductor (branch feat/file-transfer; main 912e980 had exec/history/API-key — both already mined; wire contracts are embedded in the M2–M4 plan files).
+- Final activity flush on shutdown (Go CloseAll→flush parity; today up to one flush-interval of last_activity is lost on SIGTERM).
+- Shutdown holds up to 15s with open WS connections (Go exits immediately; no active close frames sent) — document or actively close.
+- Cross-chunk StreamSafe state (per-client persistent counter; current per-chunk reset is evadable across paced chunks — tmux's per-cell cap mitigates).
+- Mode scanner edges: C0 controls inside CSI treated as malformed; DCS/OSC payloads scanned as Ground (only matters if tmux allow-passthrough is enabled); 8-bit C1 CSI unrecognized.
+- pty.write is a blocking write under mutex on the async runtime (pre-existing M2); paste_image awaits inside the pump select loop (output pauses ≤5s worst case; lag-resync absorbs).
+- /app/ws/share-under-prefix test; upload RAM spill-to-temp; symlink canonicalize (wontfix: lexical = Go parity); Range/conditional-GET (documented divergence in files.rs).
 
-## Project conventions (established M1–M4, enforced by review)
+## Project conventions (established M1–M5, enforced by review)
 
-TDD per unit; `cargo fmt --all` + `cargo clippy --workspace --all-targets -- -D warnings` clean at every commit; NO `#[allow]`; NO `unsafe` (one was removed for unsoundness — see 3f6068a); mutex poison recovery via `unwrap_or_else(|e| e.into_inner())`; Arc-clone fields into spawned tasks (never `&self`); real-tmux tests on tempdir-isolated sockets, sessions killed in-test; smoke tests must assert response BODIES and build the binary in the same shell session before starting it; kill test servers by exact PID (`pkill -f` matches your own ssh/bash command string and kills your shell).
+TDD per unit; `cargo fmt --all` + `cargo clippy --workspace --all-targets -- -D warnings` clean at every commit; NO `#[allow]`; NO `unsafe`; mutex poison recovery via `unwrap_or_else(|e| e.into_inner())`; Arc-clone fields into spawned tasks (never `&self`); real-tmux tests on tempdir-isolated sockets, sessions killed in-test; smoke tests must assert response BODIES and build the binary in the same shell session before starting it; kill test servers by exact PID (`pkill -f` matches your own ssh/bash command string and kills your shell). Parallel worktree agents per unit with explicit file ownership; controller merges + post-merge parallel reviews; plan errors found by review get the plan text amended in the same commit as the fix.
