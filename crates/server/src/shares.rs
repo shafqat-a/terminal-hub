@@ -108,7 +108,10 @@ pub async fn mint_share(
         );
     }
 
-    let path = format!("{}/s/{raw_token}", state.cfg.base_path);
+    // Go parity (api/shares.go:85): `path` is NOT base_path-prefixed — the
+    // frontend prepends `window.BASE_PATH` itself (app.js shareSession).
+    // Prefixing here would double-prefix the copied link under a base path.
+    let path = format!("/s/{raw_token}");
     let url = if state.cfg.public_url.is_empty() {
         path.clone()
     } else {

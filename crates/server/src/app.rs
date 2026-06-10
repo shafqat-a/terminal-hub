@@ -1833,7 +1833,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn base_path_share_mint_path_prefixed() {
+    async fn base_path_share_mint_path_unprefixed() {
         let (app, _dir) = test_app_based().await;
         let token = obtain_token_based(&app).await;
 
@@ -1852,10 +1852,12 @@ mod tests {
         .await;
         assert_eq!(res.status(), StatusCode::CREATED);
         let v = body_json(res).await;
+        // Go parity (api/shares.go:85): path stays un-prefixed even under a
+        // base path — app.js prepends window.BASE_PATH when building the link.
         let path = v["path"].as_str().unwrap();
         assert!(
-            path.starts_with("/app/s/"),
-            "share mint path must start with /app/s/, got: {path}"
+            path.starts_with("/s/") && !path.starts_with("/app/"),
+            "share mint path must be un-prefixed /s/<token>, got: {path}"
         );
         let url = v["url"].as_str().unwrap();
         assert_eq!(url, path, "url must equal path when public_url is empty");
