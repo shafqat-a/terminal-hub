@@ -16,6 +16,7 @@ hex = "0.4"
 sha2 = "0.10"
 subtle = "2"
 axum = { version = "0.7", features = ["ws", "multipart"] }
+base64 = "0.22"
 tower = "0.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
