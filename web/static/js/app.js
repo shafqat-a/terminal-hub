@@ -158,6 +158,9 @@ class TerminalManager {
         // attaching per-connect would stack duplicate handlers.
         this.containerEl.addEventListener('paste', (e) => this.handlePaste(e), true);
 
+        // Right-click pastes (PuTTY-style) instead of opening the browser menu.
+        this.containerEl.addEventListener('contextmenu', (e) => this.handleContextMenu(e));
+
         // Drag-and-drop a file onto the terminal to upload it into the session's CWD.
         this.containerEl.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -744,6 +747,9 @@ class TerminalManager {
             fontSize: this.prefs.fontSize,
             fontFamily: FONT_FAMILY,
             theme: this.theme().xterm,
+            // Right-click is reserved for paste; a word-select on the same click
+            // would auto-copy and clobber the clipboard before the paste reads it.
+            rightClickSelectsWord: false,
         });
 
         this.fitAddon = new FitAddon.FitAddon();
@@ -755,6 +761,9 @@ class TerminalManager {
 
         // Send terminal input to server (via sendInput so the mobile Ctrl modifier applies).
         this.term.onData((data) => this.sendInput(data));
+
+        // Mouse selection auto-copies to the clipboard (tmux/PuTTY-style).
+        this.term.onSelectionChange(() => this.queueCopySelection());
 
         // Terminal bell -> notify + mark unread if not focused.
         this.term.onBell(() => this.handleBell(serverId, sessionId));
@@ -938,24 +947,82 @@ class TerminalManager {
 
                 const blob = item.getAsFile();
                 if (!blob) return;
-
-                const reader = new FileReader();
-                reader.onload = () => {
-                    // reader.result is "data:<mime>;base64,<payload>"
-                    const base64 = String(reader.result).split(',')[1] || '';
-                    if (base64 && this.ws && this.ws.readyState === WebSocket.OPEN) {
-                        this.ws.send(JSON.stringify({
-                            type: 'paste-image',
-                            mime: blob.type || item.type,
-                            data: base64,
-                        }));
-                    }
-                };
-                reader.readAsDataURL(blob);
+                this.sendImageBlob(blob, item.type);
                 return; // only the first image
             }
         }
         // No image present: let the event continue to xterm's text paste.
+    }
+
+    // sendImageBlob ships clipboard image data to the server as a paste-image frame.
+    sendImageBlob(blob, fallbackMime) {
+        const reader = new FileReader();
+        reader.onload = () => {
+            // reader.result is "data:<mime>;base64,<payload>"
+            const base64 = String(reader.result).split(',')[1] || '';
+            if (base64 && this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({
+                    type: 'paste-image',
+                    mime: blob.type || fallbackMime || 'image/png',
+                    data: base64,
+                }));
+            }
+        };
+        reader.readAsDataURL(blob);
+    }
+
+    // --- Mouse clipboard (auto-copy on select, right-click paste) ---
+
+    // Debounced so an in-progress drag doesn't hit the clipboard on every cell
+    // the selection crosses — only the settled selection gets copied.
+    queueCopySelection() {
+        clearTimeout(this.copyTimer);
+        this.copyTimer = setTimeout(() => this.copySelection(), 150);
+    }
+
+    copySelection() {
+        if (!this.term || !this.term.hasSelection()) return;
+        const text = this.term.getSelection();
+        if (!text) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => document.execCommand('copy'));
+        } else {
+            // Plain-http origins have no async Clipboard API. execCommand('copy')
+            // fires a copy event on xterm's focused textarea, whose handler fills
+            // the clipboard with the terminal selection.
+            document.execCommand('copy');
+        }
+    }
+
+    handleContextMenu(e) {
+        if (!this.term) return;
+        // Without the async Clipboard API (plain-http origin) script can't read
+        // the clipboard at all. Leave the native menu intact — xterm parks its
+        // textarea under the pointer, so the menu's own Paste still reaches the PTY.
+        if (!navigator.clipboard || (!navigator.clipboard.read && !navigator.clipboard.readText)) return;
+        e.preventDefault();
+        this.term.focus();
+        this.pasteFromClipboard();
+    }
+
+    async pasteFromClipboard() {
+        try {
+            // Prefer clipboard.read so an image on the clipboard pastes the same
+            // way Ctrl+V does (uploaded via paste-image, path typed into the PTY).
+            if (navigator.clipboard.read) {
+                for (const item of await navigator.clipboard.read()) {
+                    const imageType = item.types.find((t) => t.startsWith('image/'));
+                    if (imageType) {
+                        this.sendImageBlob(await item.getType(imageType), imageType);
+                        return;
+                    }
+                }
+            }
+            const text = await navigator.clipboard.readText();
+            if (text) this.term.paste(text);
+        } catch {
+            // Permission denied or clipboard empty — nothing to paste.
+        }
     }
 
     // --- File transfer ---

@@ -19,6 +19,25 @@
     fitAddon.fit();
     window.addEventListener('resize', () => fitAddon.fit());
 
+    // Mouse selection auto-copies to the clipboard — the viewer is read-only,
+    // so copying is the only way to get text out. Debounced so an in-progress
+    // drag doesn't hit the clipboard on every cell. execCommand is the
+    // plain-http fallback: it routes through xterm's copy handler.
+    let copyTimer = null;
+    term.onSelectionChange(() => {
+        clearTimeout(copyTimer);
+        copyTimer = setTimeout(() => {
+            if (!term.hasSelection()) return;
+            const text = term.getSelection();
+            if (!text) return;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).catch(() => document.execCommand('copy'));
+            } else {
+                document.execCommand('copy');
+            }
+        }, 150);
+    });
+
     let ws = null;
     let reconnectAttempts = 0;
     const maxReconnectAttempts = 20;
