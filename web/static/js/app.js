@@ -755,6 +755,13 @@ class TerminalManager {
         this.fitAddon = new FitAddon.FitAddon();
         this.term.loadAddon(this.fitAddon);
         this.term.loadAddon(new WebLinksAddon.WebLinksAddon());
+        // OSC 52 support: when tmux mouse mode (or a full-screen app) owns the
+        // drag, the copy happens server-side and reaches us as an OSC 52 escape
+        // (tmux set-clipboard). xterm.js drops it by default and the copy never
+        // leaves tmux's paste buffer. Hand-rolled rather than
+        // @xterm/addon-clipboard because tmux sends an empty selection
+        // parameter ("52;;<b64>") which the addon ignores.
+        this.term.parser.registerOscHandler(52, (data) => this.handleOsc52(data));
 
         this.term.open(this.containerEl);
         this.fitAddon.fit();
@@ -992,6 +999,28 @@ class TerminalManager {
             // the clipboard with the terminal selection.
             document.execCommand('copy');
         }
+    }
+
+    // OSC 52 ("\x1b]52;Pc;Pd\x07"): a program on the server set the clipboard.
+    // Pd is the base64 payload; Pc names a selection and is ignored (tmux
+    // leaves it empty). Always returns true so xterm treats it as handled.
+    handleOsc52(data) {
+        const semi = data.indexOf(';');
+        if (semi < 0) return true;
+        const payload = data.slice(semi + 1);
+        if (payload === '?') return true; // clipboard query — never answer
+        try {
+            const bytes = Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
+            const text = new TextDecoder().decode(bytes);
+            if (text) {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).catch(() => {});
+                }
+            }
+        } catch {
+            // Malformed base64 — ignore.
+        }
+        return true;
     }
 
     handleContextMenu(e) {
