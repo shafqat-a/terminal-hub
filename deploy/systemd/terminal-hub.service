@@ -1,0 +1,25 @@
+[Unit]
+Description=Terminal Hub (tmux-backed web terminal)
+Documentation=https://github.com/shafqat-a/terminal-hub/tree/main/deploy/systemd
+After=network.target terminal-hub-tmux.service
+# Requires + After: the tmux server must be up (and own its cgroup) before the
+# app creates any session, otherwise the app would spawn the server into its
+# own cgroup and lose sessions on the next restart.
+Requires=terminal-hub-tmux.service
+
+[Service]
+Type=simple
+
+# --- host-specific: substitute at install time (see README.md) -------------
+User=__USER__
+Group=__GROUP__
+# tmux needs a writable runtime dir; HOME is set from User= automatically.
+WorkingDirectory=__HOME__
+EnvironmentFile=/etc/terminal-hub.env
+
+ExecStart=/usr/local/bin/terminal-hub
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

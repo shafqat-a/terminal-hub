@@ -1,0 +1,42 @@
+[Unit]
+Description=Terminal Hub tmux server (persistent; survives app restart/crash/redeploy)
+Documentation=https://github.com/shafqat-a/terminal-hub/tree/main/deploy/systemd
+After=network.target
+Before=terminal-hub.service
+
+[Service]
+# This unit owns the tmux SERVER in its own cgroup. That is the whole point:
+# the app (terminal-hub.service) only ever spawns tmux *clients*, which live in
+# the app's cgroup and are disposable. The server -- and therefore all live
+# sessions -- live here instead.
+#
+# Root cause this fixes: with the default KillMode=control-group on the app
+# unit, `systemctl restart terminal-hub` SIGKILLs every process in the app's
+# cgroup, including the app-spawned tmux server. tmux holds sessions in memory
+# only, so every redeploy silently destroyed all running sessions.
+Type=oneshot
+RemainAfterExit=yes
+
+# --- host-specific: substitute at install time (see README.md) -------------
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__HOME__
+# Provides AI_CONDUCTOR_DATA_DIR (the dir that holds tmux.sock).
+EnvironmentFile=/etc/terminal-hub.env
+
+# Ensure the data dir exists before the server starts (this unit runs before
+# the app on a fresh box).
+ExecStartPre=/bin/mkdir -p __DATA_DIR__
+# Keeper session => the server never auto-exits when no aidc_ sessions remain.
+ExecStart=/usr/bin/tmux -S __DATA_DIR__/tmux.sock new-session -d -s _keeper sleep infinity
+# Belt-and-suspenders: also disable tmux's exit-on-empty behaviour.
+ExecStartPost=/usr/bin/tmux -S __DATA_DIR__/tmux.sock set-option -g exit-empty off
+# Never tear down the tmux server (or its sessions) when THIS unit stops.
+# `systemd-analyze verify` warns KillMode=none is deprecated -- that warning is
+# expected and accepted here: the server MUST outlive this unit being stopped,
+# which is exactly what KillMode=none guarantees.
+ExecStop=/bin/true
+KillMode=none
+
+[Install]
+WantedBy=multi-user.target
