@@ -769,6 +769,17 @@ class TerminalManager {
         // Send terminal input to server (via sendInput so the mobile Ctrl modifier applies).
         this.term.onData((data) => this.sendInput(data));
 
+        // Wheel / touchpad scrolling. When tmux owns the alternate screen but no
+        // app is reporting the mouse, xterm.js translates the wheel into cursor
+        // (arrow) keys, which scrolls shell history / moves the cursor instead of
+        // the visible text. Intercept that one case and scroll tmux's own
+        // scrollback (copy-mode) instead. Plain scrollback and mouse-reporting
+        // apps (vim, htop, less +mouse) keep xterm's default handling.
+        this._wheelAccumPx = 0;
+        this._pendingScrollLines = 0;
+        this._scrollFlushQueued = false;
+        this.term.attachCustomWheelEventHandler((ev) => this.handleWheel(ev));
+
         // Mouse selection auto-copies to the clipboard (tmux/PuTTY-style).
         this.term.onSelectionChange(() => this.queueCopySelection());
 
@@ -1140,6 +1151,60 @@ class TerminalManager {
         el.textContent = message;
         host.appendChild(el);
         setTimeout(() => el.remove(), 4000);
+    }
+
+    // --- Wheel / touchpad scrolling ---
+
+    // Custom xterm wheel handler. Returning true keeps xterm's default
+    // behavior; false cancels it (so no arrow keys leak to the PTY).
+    handleWheel(ev) {
+        // Normal screen: let xterm scroll its own scrollback buffer.
+        if (this.term.buffer.active.type !== 'alternate') return true;
+        // A full-screen app is reporting the mouse (vim, htop, less +mouse):
+        // let xterm forward the wheel to it as mouse events.
+        if (this.term.modes.mouseTrackingMode !== 'none') return true;
+        // tmux on the alt screen without mouse reporting: xterm would emit
+        // cursor keys here. Scroll tmux's scrollback instead.
+        const lines = this.wheelDeltaToLines(ev);
+        if (lines !== 0) {
+            this._pendingScrollLines += lines;
+            this.flushScrollSoon();
+        }
+        ev.preventDefault();
+        return false;
+    }
+
+    // Convert a wheel event to a signed line count (negative = up), carrying
+    // sub-line remainders across events so trackpad pixel deltas accumulate.
+    wheelDeltaToLines(ev) {
+        const cell = Math.max(1, Math.round(this.prefs.fontSize * 1.2));
+        let px = ev.deltaY;
+        if (ev.deltaMode === 1) px *= cell;                                   // lines -> px
+        else if (ev.deltaMode === 2) px *= (this.containerEl?.clientHeight || cell * 10); // pages -> px
+        this._wheelAccumPx += px;
+        const lines = Math.trunc(this._wheelAccumPx / cell);
+        this._wheelAccumPx -= lines * cell;
+        return lines;
+    }
+
+    // Coalesce a burst of wheel events into one scroll message per frame so a
+    // fast trackpad flick doesn't spawn a tmux process per pixel delta.
+    flushScrollSoon() {
+        if (this._scrollFlushQueued) return;
+        this._scrollFlushQueued = true;
+        requestAnimationFrame(() => {
+            this._scrollFlushQueued = false;
+            const lines = this._pendingScrollLines;
+            this._pendingScrollLines = 0;
+            if (lines === 0) return;
+            this.sendScroll(lines < 0 ? 'up' : 'down', Math.abs(lines));
+        });
+    }
+
+    sendScroll(dir, lines) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'scroll', dir, lines }));
+        }
     }
 
     // --- Input (with mobile Ctrl modifier) ---

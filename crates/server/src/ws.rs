@@ -2,7 +2,7 @@
 //!
 //! Wire protocol (Go-compatible):
 //! - Server→client: Text frames carrying JSON `{"type":"output","data":"..."}`.
-//! - Client→server: Text JSON `{"type":"input"|"resize"|"paste-image",...}` or Binary (raw PTY bytes).
+//! - Client→server: Text JSON `{"type":"input"|"resize"|"paste-image"|"scroll",...}` or Binary (raw PTY bytes).
 //! - On attach: capture-pane snapshot with LF→CRLF, sent as first output frame,
 //!   then a re-assert frame for any active DEC private modes (spec §4.3).
 //! - Live output: per-client UTF-8 boundary carry (§4.1) + UAX #15 stream-safe
@@ -226,6 +226,52 @@ struct ClientMsg {
     cols: u16,
     #[serde(default)]
     mime: String,
+    /// "scroll" direction: "up" or "down".
+    #[serde(default)]
+    dir: String,
+    /// "scroll" magnitude in terminal lines.
+    #[serde(default)]
+    lines: u16,
+}
+
+/// Wheel/touchpad scroll → tmux copy-mode scroll of the session's own
+/// scrollback. The frontend sends this only when a full-screen app (tmux)
+/// owns the alternate screen WITHOUT mouse reporting active — the case where
+/// xterm.js would otherwise translate the wheel into cursor-key presses
+/// (shell history / cursor movement) instead of scrolling the text.
+async fn scroll_tmux(data_dir: &std::path::Path, name: &str, dir: &str, lines: u16) {
+    if lines == 0 {
+        return;
+    }
+    // Bound the repeat count: a hostile/buggy client cannot make tmux churn.
+    let n = lines.min(500).to_string();
+    let args: Vec<&str> = match dir {
+        // Enter copy-mode (`-e` auto-exits when scrolled back to the bottom),
+        // then scroll up N lines. The bare `;` is a tmux command separator, so
+        // both run in a single tmux invocation.
+        "up" => vec![
+            "copy-mode",
+            "-e",
+            "-t",
+            name,
+            ";",
+            "send-keys",
+            "-X",
+            "-t",
+            name,
+            "-N",
+            &n,
+            "scroll-up",
+        ],
+        // Scrolling down only means anything while already in copy-mode. If the
+        // pane is not in a mode tmux errors harmlessly and we ignore it — this
+        // avoids spuriously entering copy-mode on a downward scroll at the foot.
+        "down" => vec!["send-keys", "-X", "-t", name, "-N", &n, "scroll-down"],
+        _ => return,
+    };
+    if let Err(e) = tmux::run(data_dir, &args).await {
+        tracing::debug!("session {name} scroll ({dir} {n}) failed: {e}");
+    }
 }
 
 /// Drive the WebSocket connection: snapshot repaint on attach, then fan-out
@@ -323,6 +369,9 @@ pub async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf, read
                                     sess.pty.resize(msg.rows, msg.cols).ok();
                                     *sess.size.lock().unwrap_or_else(|e| e.into_inner()) =
                                         (msg.cols, msg.rows);
+                                }
+                                "scroll" => {
+                                    scroll_tmux(&data_dir, &tmux_name, &msg.dir, msg.lines).await;
                                 }
                                 "paste-image" => {
                                     // Go StdEncoding = standard alphabet, padded.
@@ -845,6 +894,71 @@ mod tests {
         assert!(
             width_ok,
             "tmux window_width should become 120 after resize message"
+        );
+    }
+
+    #[tokio::test]
+    async fn scroll_up_enters_tmux_copy_mode() {
+        let (addr, state, dir) = spawn_server().await;
+
+        let sess = state.manager.create(None).await.expect("create session");
+        let id = sess.id.clone();
+        let tmux_name = tmux::session_name(&id);
+
+        let expires = crate::util::unix_now() + 3600;
+        state
+            .store
+            .add_auth_session("wsscrolltoken", expires)
+            .unwrap();
+
+        // Produce enough output for there to be scrollback to scroll into.
+        sess.pty
+            .write(b"for i in $(seq 1 200); do echo line$i; done\n")
+            .expect("pty write");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let url = format!("ws://{addr}/ws/{id}?token=wsscrolltoken");
+        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("WS connect");
+        let (mut sink, mut stream) = ws.split();
+
+        // Drain snapshot.
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .ok();
+
+        // A wheel-up scroll message should put the pane into copy-mode.
+        let scroll = serde_json::json!({"type": "scroll", "dir": "up", "lines": 5}).to_string();
+        sink.send(TungsteniteMessage::Text(scroll))
+            .await
+            .expect("send scroll");
+
+        // Poll tmux until the pane reports it is in a mode (copy-mode).
+        let data_dir = dir.path().to_path_buf();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut in_mode = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(out) = tmux::run(
+                &data_dir,
+                &["display-message", "-p", "-t", &tmux_name, "#{pane_in_mode}"],
+            )
+            .await
+            {
+                if out.trim_ascii() == b"1" {
+                    in_mode = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        sink.send(TungsteniteMessage::Close(None)).await.ok();
+        state.manager.delete(&id).await.ok();
+
+        assert!(
+            in_mode,
+            "tmux pane should be in copy-mode after a scroll-up message"
         );
     }
 
