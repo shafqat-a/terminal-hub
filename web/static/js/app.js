@@ -955,8 +955,7 @@ class TerminalManager {
     // Capture-phase paste handler. Image clipboard content is sent to the
     // server; text paste is left for xterm.js to handle normally.
     handlePaste(e) {
-        const items = e.clipboardData && e.clipboardData.items;
-        if (!items) return;
+        const items = (e.clipboardData && e.clipboardData.items) || [];
 
         for (const item of items) {
             if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
@@ -969,7 +968,20 @@ class TerminalManager {
                 return; // only the first image
             }
         }
-        // No image present: let the event continue to xterm's text paste.
+
+        // No image in the synchronous paste payload. macOS puts a PNG on the
+        // clipboard that shows up here; Windows Chrome/Edge keep a copied image
+        // as a DIB bitmap that only the async Clipboard API exposes. If there's
+        // also no text to paste, fall back to clipboard.read() for an image
+        // before giving up (mirrors the right-click paste path).
+        const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+        if (!text && navigator.clipboard && navigator.clipboard.read) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.pasteFromClipboard();
+            return;
+        }
+        // Text present (or no async clipboard): let xterm handle the text paste.
     }
 
     // sendImageBlob ships clipboard image data to the server as a paste-image frame.
