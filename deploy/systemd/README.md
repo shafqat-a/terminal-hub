@@ -70,6 +70,31 @@ sudo systemctl enable --now terminal-hub.service
 > The `__DATA_DIR__` placeholder must match `AI_CONDUCTOR_DATA_DIR` in
 > `/etc/terminal-hub.env`. The tmux socket is always `$DATA_DIR/tmux.sock`.
 
+## Adopting an already-running tmux server
+
+If the app was previously installed as a single unit, the tmux server (and
+every live session) already exists inside `terminal-hub.service`'s cgroup.
+Starting `terminal-hub-tmux.service` then only adds `_keeper` to that server;
+its own cgroup stays empty and is removed, so the next app restart would still
+kill everything. Move the live tree over once (cgroup v2, as root):
+
+```sh
+CG=/sys/fs/cgroup/system.slice/terminal-hub-tmux.service
+APP=/sys/fs/cgroup/system.slice/terminal-hub.service
+APP_PID=$(systemctl show -p MainPID --value terminal-hub.service)
+sudo mkdir -p $CG
+for p in $(cat $APP/cgroup.procs); do
+  # keep the app and its own tmux *clients*; move the server + everything else
+  [ "$p" = "$APP_PID" ] && continue
+  [ "$(awk '/^PPid/{print $2}' /proc/$p/status)" = "$APP_PID" ] && continue
+  echo $p | sudo tee $CG/cgroup.procs >/dev/null
+done
+cat /proc/$(tmux -S $DATA_DIR/tmux.sock display-message -p '#{pid}')/cgroup   # => terminal-hub-tmux.service
+```
+
+After that a redeploy is safe. (The keeper uses `new-session -A` so the tmux
+unit is idempotent against a server that already has `_keeper`.)
+
 ## Build & redeploy a new binary
 
 ```sh

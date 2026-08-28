@@ -28,7 +28,7 @@ EnvironmentFile=/etc/terminal-hub.env
 # the app on a fresh box).
 ExecStartPre=/bin/mkdir -p __DATA_DIR__
 # Keeper session => the server never auto-exits when no aidc_ sessions remain.
-ExecStart=/usr/bin/tmux -S __DATA_DIR__/tmux.sock new-session -d -s _keeper sleep infinity
+ExecStart=/usr/bin/tmux -S __DATA_DIR__/tmux.sock new-session -A -d -s _keeper sleep infinity
 # Belt-and-suspenders: also disable tmux's exit-on-empty behaviour.
 ExecStartPost=/usr/bin/tmux -S __DATA_DIR__/tmux.sock set-option -g exit-empty off
 # Never tear down the tmux server (or its sessions) when THIS unit stops.
