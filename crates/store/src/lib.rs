@@ -40,6 +40,36 @@ pub struct ShareRow {
     pub revoked: bool,
 }
 
+/// One chat turn (a question or a reply) bound to a terminal session.
+/// Timestamps are unix **milliseconds** so turns order correctly within a
+/// second (unlike the seconds-granularity session stamps).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatRow {
+    pub id: i64,
+    pub session_id: String,
+    /// "user" | "assistant"
+    pub role: String,
+    pub content: String,
+    /// "pending" | "done" | "timeout" | "cancelled" | "interrupted" | "error"
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// For assistant rows: id of the user row this reply answers.
+    pub request_id: Option<i64>,
+    /// "chat" (asked through the API) | "import" (parsed from the console's
+    /// scrollback).
+    pub source: String,
+}
+
+/// Per-session chat digest for the mobile overview screen.
+#[derive(Debug, Clone)]
+pub struct ChatSummary {
+    pub session_id: String,
+    pub count: i64,
+    pub pending: bool,
+    pub last: ChatRow,
+}
+
 #[derive(Debug)]
 pub struct Store {
     pub(crate) conn: Mutex<Connection>,
@@ -123,7 +153,239 @@ impl Store {
     pub fn delete_session(&self, id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let rows = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        // Chat history is meaningless without its console.
+        conn.execute(
+            "DELETE FROM chat_messages WHERE session_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM chat_clear_marks WHERE session_id = ?1",
+            params![id],
+        )?;
         Ok(rows > 0)
+    }
+
+    // ---- Chat turns (v4) --------------------------------------------------
+
+    /// Insert one chat turn (source "chat"); returns its id.
+    pub fn insert_chat_message(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        status: &str,
+        request_id: Option<i64>,
+        now_ms: i64,
+    ) -> Result<i64, StoreError> {
+        self.insert_chat_message_from(
+            session_id, role, content, status, request_id, now_ms, "chat",
+        )
+    }
+
+    /// Insert one chat turn with an explicit `source`; returns its id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_chat_message_from(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        status: &str,
+        request_id: Option<i64>,
+        now_ms: i64,
+        source: &str,
+    ) -> Result<i64, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO chat_messages (session_id, role, content, status, created_at, updated_at, request_id, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+            params![session_id, role, content, status, now_ms, request_id, source],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// The `limit` most recent user turns of a session, newest first, with
+    /// the reply row (if any) that answers each. Used to align a parsed
+    /// console transcript with what is already stored.
+    pub fn recent_user_turns(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(ChatRow, Option<ChatRow>)>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {CHAT_COLS} FROM chat_messages m
+             WHERE session_id = ?1 AND role = 'user' ORDER BY id DESC LIMIT ?2"
+        ))?;
+        let users: Vec<ChatRow> = stmt
+            .query_map(params![session_id, limit as i64], chat_row)?
+            .collect::<Result<_, _>>()?;
+        let mut reply_stmt = conn.prepare(&format!(
+            "SELECT {CHAT_COLS} FROM chat_messages m
+             WHERE session_id = ?1 AND role = 'assistant' AND request_id = ?2
+             ORDER BY id ASC LIMIT 1"
+        ))?;
+        let mut out = Vec::with_capacity(users.len());
+        for u in users {
+            let reply = reply_stmt
+                .query_map(params![session_id, u.id], chat_row)?
+                .next()
+                .transpose()?;
+            out.push((u, reply));
+        }
+        Ok(out)
+    }
+
+    /// Overwrite content + status of a turn (used while a reply streams in and
+    /// when it settles). Returns `false` when the id does not exist.
+    pub fn update_chat_message(
+        &self,
+        id: i64,
+        content: &str,
+        status: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let rows = conn.execute(
+            "UPDATE chat_messages SET content = ?1, status = ?2, updated_at = ?3 WHERE id = ?4",
+            params![content, status, now_ms, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn get_chat_message(&self, id: i64) -> Result<Option<ChatRow>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {CHAT_COLS} FROM chat_messages m WHERE id = ?1"
+        ))?;
+        let mut rows = stmt.query_map(params![id], chat_row)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Cursor-paginated turns for one session, always returned in ascending
+    /// id order.
+    ///
+    /// * `after = Some(id)` → the `limit` turns newer than `id` (catch-up /
+    ///   live tail).
+    /// * `before = Some(id)` → the `limit` turns older than `id` (scrolling
+    ///   back through history).
+    /// * neither → the newest `limit` turns (initial screen).
+    ///
+    /// The second element reports whether more rows exist beyond the page in
+    /// the direction that was walked.
+    pub fn list_chat_messages(
+        &self,
+        session_id: &str,
+        after: Option<i64>,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<(Vec<ChatRow>, bool), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Fetch one extra row to learn whether a further page exists.
+        let probe = limit as i64 + 1;
+        let mut rows: Vec<ChatRow> = match (after, before) {
+            (Some(after), _) => {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {CHAT_COLS} FROM chat_messages m
+                     WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3"
+                ))?;
+                let it = stmt.query_map(params![session_id, after, probe], chat_row)?;
+                it.collect::<Result<_, _>>()?
+            }
+            (None, Some(before)) => {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {CHAT_COLS} FROM chat_messages m
+                     WHERE session_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3"
+                ))?;
+                let it = stmt.query_map(params![session_id, before, probe], chat_row)?;
+                it.collect::<Result<_, _>>()?
+            }
+            (None, None) => {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {CHAT_COLS} FROM chat_messages m
+                     WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2"
+                ))?;
+                let it = stmt.query_map(params![session_id, probe], chat_row)?;
+                it.collect::<Result<_, _>>()?
+            }
+        };
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        if after.is_none() {
+            // DESC queries: flip back to ascending for the wire.
+            rows.reverse();
+        }
+        Ok((rows, has_more))
+    }
+
+    /// Newest turn + count + pending flag for every session that has chat
+    /// history. One query, so the overview screen costs a single round-trip.
+    pub fn chat_summaries(&self) -> Result<Vec<ChatSummary>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {CHAT_COLS}, agg.n, agg.pending
+             FROM chat_messages m
+             JOIN (
+               SELECT session_id, MAX(id) AS max_id, COUNT(*) AS n,
+                      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
+               FROM chat_messages GROUP BY session_id
+             ) agg ON agg.max_id = m.id"
+        ))?;
+        let it = stmt.query_map([], |row| {
+            let last = chat_row(row)?;
+            let count: i64 = row.get(9)?;
+            let pending: i64 = row.get(10)?;
+            Ok(ChatSummary {
+                session_id: last.session_id.clone(),
+                count,
+                pending: pending > 0,
+                last,
+            })
+        })?;
+        Ok(it.collect::<Result<_, _>>()?)
+    }
+
+    /// Remember where the console transcript stood when its chat history was
+    /// cleared, so a later scrollback sync does not resurrect the cleared
+    /// turns. `anchor` is the text of the last question visible at that time.
+    pub fn set_chat_clear_mark(&self, session_id: &str, anchor: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR REPLACE INTO chat_clear_marks (session_id, anchor) VALUES (?1, ?2)",
+            params![session_id, anchor],
+        )?;
+        Ok(())
+    }
+
+    pub fn chat_clear_mark(&self, session_id: &str) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare("SELECT anchor FROM chat_clear_marks WHERE session_id = ?1")?;
+        let mut rows = stmt.query_map(params![session_id], |r| r.get::<_, String>(0))?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Wipe a session's chat history. Returns the number of turns removed.
+    pub fn clear_chat(&self, session_id: &str) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(conn.execute(
+            "DELETE FROM chat_messages WHERE session_id = ?1",
+            params![session_id],
+        )?)
+    }
+
+    /// Replies still `pending` when the server starts were orphaned by a
+    /// restart: their capture task is gone. Mark them so clients stop waiting.
+    pub fn abandon_pending_chat(&self, now_ms: i64) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(conn.execute(
+            "UPDATE chat_messages SET status = 'interrupted', updated_at = ?1 WHERE status = 'pending'",
+            params![now_ms],
+        )?)
     }
 
     /// Set the status of a session row.
@@ -295,6 +557,23 @@ fn map_share_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ShareRow> {
     })
 }
 
+const CHAT_COLS: &str =
+    "m.id, m.session_id, m.role, m.content, m.status, m.created_at, m.updated_at, m.request_id, m.source";
+
+fn chat_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatRow> {
+    Ok(ChatRow {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        role: row.get(2)?,
+        content: row.get(3)?,
+        status: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        request_id: row.get(7)?,
+        source: row.get(8)?,
+    })
+}
+
 // ---- Versioned migration runner ----
 
 fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
@@ -333,6 +612,46 @@ fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
              );
              CREATE INDEX IF NOT EXISTS idx_share_links_session ON share_links(session_id);
              PRAGMA user_version = 3;
+             COMMIT;",
+        )?;
+    }
+
+    if version < 4 {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS chat_messages (
+               id          INTEGER PRIMARY KEY AUTOINCREMENT,
+               session_id  TEXT NOT NULL,
+               role        TEXT NOT NULL,
+               content     TEXT NOT NULL DEFAULT '',
+               status      TEXT NOT NULL DEFAULT 'done',
+               created_at  INTEGER NOT NULL,
+               updated_at  INTEGER NOT NULL,
+               request_id  INTEGER
+             );
+             CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, id);
+             PRAGMA user_version = 4;
+             COMMIT;",
+        )?;
+    }
+
+    if version < 5 {
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE chat_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'chat';
+             PRAGMA user_version = 5;
+             COMMIT;",
+        )?;
+    }
+
+    if version < 6 {
+        conn.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS chat_clear_marks (
+               session_id TEXT PRIMARY KEY,
+               anchor     TEXT NOT NULL
+             );
+             PRAGMA user_version = 6;
              COMMIT;",
         )?;
     }
@@ -565,7 +884,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 3);
+        assert_eq!(ver, 6);
     }
 
     #[test]
@@ -705,5 +1024,169 @@ mod tests {
         let wrong = sha256_bytes(b"wrongtoken");
         let result = store.redeem_share(&wrong, 1000).unwrap();
         assert!(result.is_none(), "wrong hash must not redeem");
+    }
+
+    // ---- chat_messages (v4) ------------------------------------------------
+
+    #[test]
+    fn chat_insert_update_get_roundtrip() {
+        let (store, _d) = open_temp();
+        let q = store
+            .insert_chat_message("s1", "user", "hello", "done", None, 1000)
+            .unwrap();
+        let a = store
+            .insert_chat_message("s1", "assistant", "", "pending", Some(q), 1001)
+            .unwrap();
+        assert!(a > q, "ids are monotonic");
+        assert!(store
+            .update_chat_message(a, "hi there", "done", 1500)
+            .unwrap());
+        let row = store.get_chat_message(a).unwrap().expect("row");
+        assert_eq!(row.role, "assistant");
+        assert_eq!(row.content, "hi there");
+        assert_eq!(row.status, "done");
+        assert_eq!(row.created_at, 1001);
+        assert_eq!(row.updated_at, 1500);
+        assert_eq!(row.request_id, Some(q));
+        assert!(!store.update_chat_message(9999, "", "done", 0).unwrap());
+        assert!(store.get_chat_message(9999).unwrap().is_none());
+    }
+
+    #[test]
+    fn chat_list_pagination_after_before_latest() {
+        let (store, _d) = open_temp();
+        let ids: Vec<i64> = (0..7)
+            .map(|i| {
+                store
+                    .insert_chat_message("s1", "user", &format!("m{i}"), "done", None, i)
+                    .unwrap()
+            })
+            .collect();
+        store
+            .insert_chat_message("other", "user", "x", "done", None, 99)
+            .unwrap();
+
+        // Latest page: newest 3, ascending, more exist.
+        let (rows, more) = store.list_chat_messages("s1", None, None, 3).unwrap();
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), &ids[4..7]);
+        assert!(more);
+
+        // Scroll back before the oldest of that page.
+        let (rows, more) = store
+            .list_chat_messages("s1", None, Some(ids[4]), 3)
+            .unwrap();
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), &ids[1..4]);
+        assert!(more);
+        let (rows, more) = store
+            .list_chat_messages("s1", None, Some(ids[1]), 3)
+            .unwrap();
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), &ids[0..1]);
+        assert!(!more);
+
+        // Catch up after a cursor.
+        let (rows, more) = store
+            .list_chat_messages("s1", Some(ids[5]), None, 10)
+            .unwrap();
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), &ids[6..7]);
+        assert!(!more);
+
+        // Other sessions never leak in.
+        assert!(rows.iter().all(|r| r.session_id == "s1"));
+    }
+
+    #[test]
+    fn chat_summaries_clear_and_abandon() {
+        let (store, _d) = open_temp();
+        assert!(store.chat_summaries().unwrap().is_empty());
+        let q = store
+            .insert_chat_message("s1", "user", "q", "done", None, 1)
+            .unwrap();
+        let a = store
+            .insert_chat_message("s1", "assistant", "partial", "pending", Some(q), 2)
+            .unwrap();
+        store
+            .insert_chat_message("s2", "user", "only", "done", None, 3)
+            .unwrap();
+
+        let mut sums = store.chat_summaries().unwrap();
+        sums.sort_by(|x, y| x.session_id.cmp(&y.session_id));
+        assert_eq!(sums.len(), 2);
+        assert_eq!(sums[0].session_id, "s1");
+        assert_eq!(sums[0].count, 2);
+        assert!(sums[0].pending);
+        assert_eq!(sums[0].last.id, a);
+        assert_eq!(sums[1].count, 1);
+        assert!(!sums[1].pending);
+
+        assert_eq!(store.abandon_pending_chat(50).unwrap(), 1);
+        let row = store.get_chat_message(a).unwrap().unwrap();
+        assert_eq!(row.status, "interrupted");
+        assert_eq!(row.updated_at, 50);
+
+        assert_eq!(store.clear_chat("s1").unwrap(), 2);
+        assert_eq!(store.chat_summaries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn chat_source_and_recent_user_turns() {
+        let (store, _d) = open_temp();
+        let q1 = store
+            .insert_chat_message("s1", "user", "one", "done", None, 1)
+            .unwrap();
+        store
+            .insert_chat_message("s1", "assistant", "1", "done", Some(q1), 2)
+            .unwrap();
+        let q2 = store
+            .insert_chat_message_from("s1", "user", "two", "done", None, 3, "import")
+            .unwrap();
+        let a2 = store
+            .insert_chat_message_from("s1", "assistant", "2", "done", Some(q2), 4, "import")
+            .unwrap();
+        store
+            .insert_chat_message("s1", "user", "three", "done", None, 5)
+            .unwrap();
+        assert_eq!(store.get_chat_message(q1).unwrap().unwrap().source, "chat");
+        assert_eq!(
+            store.get_chat_message(a2).unwrap().unwrap().source,
+            "import"
+        );
+
+        let recent = store.recent_user_turns("s1", 2).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].0.content, "three");
+        assert!(recent[0].1.is_none(), "no reply yet");
+        assert_eq!(recent[1].0.content, "two");
+        assert_eq!(recent[1].1.as_ref().unwrap().id, a2);
+    }
+
+    #[test]
+    fn chat_clear_mark_roundtrip() {
+        let (store, _d) = open_temp();
+        assert!(store.chat_clear_mark("s1").unwrap().is_none());
+        store.set_chat_clear_mark("s1", "last question").unwrap();
+        assert_eq!(
+            store.chat_clear_mark("s1").unwrap().as_deref(),
+            Some("last question")
+        );
+        store.set_chat_clear_mark("s1", "newer").unwrap();
+        assert_eq!(
+            store.chat_clear_mark("s1").unwrap().as_deref(),
+            Some("newer")
+        );
+        store.upsert_session("s1", "n", 1).unwrap();
+        store.delete_session("s1").unwrap();
+        assert!(store.chat_clear_mark("s1").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_session_drops_its_chat() {
+        let (store, _d) = open_temp();
+        store.upsert_session("s1", "n", 1).unwrap();
+        store
+            .insert_chat_message("s1", "user", "q", "done", None, 1)
+            .unwrap();
+        assert!(store.delete_session("s1").unwrap());
+        let (rows, _) = store.list_chat_messages("s1", None, None, 10).unwrap();
+        assert!(rows.is_empty());
     }
 }

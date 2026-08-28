@@ -1,0 +1,15 @@
+{
+  "name": "Terminal Hub Remote",
+  "short_name": "Remote",
+  "description": "Chat with your terminal sessions",
+  "start_url": "../remote",
+  "scope": "../",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1a1b26",
+  "theme_color": "#1a1b26",
+  "icons": [
+    { "src": "img/remote-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "img/remote-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

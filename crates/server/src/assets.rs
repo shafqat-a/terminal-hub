@@ -79,6 +79,18 @@ pub async fn login_page(State(state): State<SharedState>) -> Response {
     serve_substituted("templates/login.html", &state.cfg.base_path, StatusCode::OK)
 }
 
+/// Mobile-first chat client (`/remote`). Served without the auth gate: the
+/// page is a static shell with no secrets, and it carries its own login
+/// screen so an expired session degrades to "sign in again" rather than a
+/// redirect bounce. Every API call it makes is gated as usual.
+pub async fn remote_page(State(state): State<SharedState>) -> Response {
+    serve_substituted(
+        "templates/remote.html",
+        &state.cfg.base_path,
+        StatusCode::OK,
+    )
+}
+
 pub async fn terminal_page(State(state): State<SharedState>) -> Response {
     serve_substituted(
         "templates/terminal.html",

@@ -78,6 +78,61 @@ pub async fn capture_pane(data_dir: &Path, name: &str, lines: u32) -> Result<Vec
     .await
 }
 
+/// Scrollback/screen geometry of a session's active pane, read in one
+/// `display-message` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneMetrics {
+    /// Lines currently held in scrollback (above the visible screen).
+    pub history_size: i64,
+    /// Visible rows.
+    pub height: i64,
+    /// Cursor row within the visible screen (0-based).
+    pub cursor_y: i64,
+}
+
+pub async fn pane_metrics(data_dir: &Path, name: &str) -> Result<PaneMetrics, TmuxError> {
+    let out = run(
+        data_dir,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            name,
+            "#{history_size}\t#{pane_height}\t#{cursor_y}",
+        ],
+    )
+    .await?;
+    let text = String::from_utf8_lossy(&out);
+    let mut parts = text.trim().split('\t').map(|p| p.trim().parse::<i64>());
+    let mut next = || {
+        parts
+            .next()
+            .and_then(|r| r.ok())
+            .ok_or_else(|| TmuxError::Parse(format!("pane metrics: {:?}", text.trim())))
+    };
+    Ok(PaneMetrics {
+        history_size: next()?,
+        height: next()?,
+        cursor_y: next()?,
+    })
+}
+
+/// Plain-text capture (no escape sequences, wrapped lines re-joined) from
+/// `lines_above` scrollback lines above the visible screen through the
+/// bottom of the screen. `lines_above = 0` captures just the visible screen.
+pub async fn capture_pane_plain(
+    data_dir: &Path,
+    name: &str,
+    lines_above: i64,
+) -> Result<Vec<u8>, TmuxError> {
+    let start = format!("-{}", lines_above.max(0));
+    run(
+        data_dir,
+        &["capture-pane", "-t", name, "-p", "-J", "-S", &start],
+    )
+    .await
+}
+
 /// PID of the shell running in the session's pane. Used to resolve the
 /// session's working directory via `/proc/<pid>/cwd`, since the server only
 /// holds the tmux client process, not the shell itself (Go: tmuxPanePID).

@@ -1,12 +1,14 @@
 mod app;
 mod assets;
 mod auth;
+mod chat;
 mod config;
 mod exec_history;
 mod files;
 mod handlers;
 pub mod session;
 mod shares;
+mod transcript;
 mod util;
 mod ws;
 

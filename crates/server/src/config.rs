@@ -28,6 +28,10 @@ pub struct Config {
     /// URL path prefix the app is mounted under (AI_CONDUCTOR_BASE_PATH).
     /// Normalized to "" (root) or "/prefix" — leading slash, no trailing slash.
     pub base_path: String,
+    /// Human-readable name reported by `GET /api/server/info` so a client
+    /// that talks to several hubs can label them (AI_CONDUCTOR_SERVER_NAME,
+    /// default: the machine hostname).
+    pub server_name: String,
 }
 
 /// Normalize a configured base path into "" (root) or "/prefix" with a
@@ -40,6 +44,16 @@ fn normalize_base_path(raw: &str) -> String {
     } else {
         format!("/{p}")
     }
+}
+
+/// Best-effort machine hostname; "terminal-hub" when it cannot be read.
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "terminal-hub".into())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -131,6 +145,9 @@ impl Config {
             public_url: lookup("AI_CONDUCTOR_PUBLIC_URL").unwrap_or_default(),
             max_upload_bytes,
             base_path: normalize_base_path(&lookup("AI_CONDUCTOR_BASE_PATH").unwrap_or_default()),
+            server_name: lookup("AI_CONDUCTOR_SERVER_NAME")
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(hostname),
         })
     }
 }

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta name="theme-color" content="#1a1b26">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Remote">
+    <title>Remote · Terminal Hub</title>
+    <link rel="manifest" href="__BASE_PATH__/static/remote.webmanifest">
+    <link rel="icon" href="__BASE_PATH__/static/img/remote-icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="__BASE_PATH__/static/img/remote-icon.svg">
+    <link rel="stylesheet" href="__BASE_PATH__/static/css/remote.css">
+    <script>window.BASE_PATH = "__BASE_PATH__";</script>
+</head>
+<body>
+    <div class="app" id="app" data-view="home">
+
+        <!-- Home: servers + sessions -->
+        <section class="pane pane-home" id="pane-home" aria-label="Servers and sessions">
+            <header class="bar">
+                <h1 class="bar-title">Remote</h1>
+                <div class="bar-actions">
+                    <button class="icon-btn" id="btn-refresh" title="Refresh" aria-label="Refresh">&#x21bb;</button>
+                    <button class="icon-btn" id="btn-add-server" title="Add server" aria-label="Add server">+</button>
+                </div>
+            </header>
+            <div class="scroll" id="home-list"></div>
+            <footer class="home-foot">
+                <a href="__BASE_PATH__/terminal" class="foot-link">Full terminal</a>
+            </footer>
+        </section>
+
+        <!-- Chat thread -->
+        <section class="pane pane-chat" id="pane-chat" aria-label="Chat">
+            <header class="bar">
+                <button class="icon-btn back" id="btn-back" aria-label="Back">&#x2190;</button>
+                <div class="bar-heading">
+                    <div class="bar-title" id="chat-title">Session</div>
+                    <div class="bar-sub"><span id="chat-server"></span> <span class="pill" id="chat-live">offline</span></div>
+                </div>
+                <div class="bar-actions">
+                    <button class="icon-btn" id="btn-chat-menu" aria-label="Menu" aria-haspopup="menu">&#x22ee;</button>
+                </div>
+            </header>
+            <div class="menu" id="chat-menu" role="menu" hidden>
+                <button role="menuitem" data-action="fast">Fast mode (shell)</button>
+                <button role="menuitem" data-action="refresh">Reload messages</button>
+                <button role="menuitem" data-action="clear">Clear chat history</button>
+            </div>
+            <div class="scroll messages" id="messages">
+                <div class="placeholder" id="chat-placeholder">Pick a session to start chatting.</div>
+            </div>
+            <form class="composer" id="composer" autocomplete="off">
+                <textarea id="input" rows="1" placeholder="Ask the console…" aria-label="Message" enterkeyhint="send"></textarea>
+                <button type="button" class="stop-btn" id="btn-stop" title="Interrupt (Ctrl-C)" hidden>Stop</button>
+                <button type="submit" class="send-btn" id="btn-send" aria-label="Send">&#x27A4;</button>
+            </form>
+        </section>
+
+        <!-- Sheet: sign in / add server -->
+        <div class="sheet-backdrop" id="sheet" hidden>
+            <form class="sheet" id="sheet-form">
+                <h2 id="sheet-title">Sign in</h2>
+                <p class="sheet-sub" id="sheet-sub"></p>
+                <label id="sheet-name-row"><span>Name</span><input id="sheet-name" type="text" placeholder="Workstation"></label>
+                <label id="sheet-url-row"><span>URL</span><input id="sheet-url" type="url" placeholder="http://192.168.0.66:5050" inputmode="url"></label>
+                <label><span>Password</span><input id="sheet-password" type="password" autocomplete="current-password" required></label>
+                <div class="sheet-error" id="sheet-error" hidden></div>
+                <div class="sheet-actions">
+                    <button type="button" class="ghost" id="sheet-cancel">Cancel</button>
+                    <button type="submit" class="primary" id="sheet-submit">Sign in</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="toast" id="toast" hidden></div>
+    </div>
+    <script src="__BASE_PATH__/static/js/remote.js"></script>
+</body>
+</html>

@@ -24,6 +24,8 @@ pub struct AppState {
     pub manager: session::Manager,
     /// Resolved API key (either from config or auto-generated at startup).
     pub api_key: String,
+    /// Chat coordination: pending replies + live turn fan-out.
+    pub chat: crate::chat::ChatHub,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -54,6 +56,13 @@ pub async fn build_state(cfg: Config) -> SharedState {
         }
     };
 
+    // Replies left pending by a previous process can never complete.
+    match store.abandon_pending_chat(crate::util::unix_now_ms()) {
+        Ok(n) if n > 0 => tracing::info!("chat: marked {n} orphaned pending replies interrupted"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("chat: abandon pending failed: {e}"),
+    }
+
     let state = Arc::new(AppState {
         cfg,
         auth,
@@ -61,6 +70,7 @@ pub async fn build_state(cfg: Config) -> SharedState {
         store,
         manager,
         api_key,
+        chat: crate::chat::ChatHub::new(),
     });
 
     state.manager.init().await;
@@ -135,6 +145,25 @@ pub fn build_app(state: SharedState) -> Router {
             )),
         )
         .route("/api/sessions/:id/download", get(files::download))
+        // Chat API (mobile question/reply client); see chat.rs for the contract.
+        .route(
+            "/api/sessions/:id/chat",
+            post(crate::chat::chat_send)
+                .get(crate::chat::chat_list)
+                .delete(crate::chat::chat_clear),
+        )
+        .route(
+            "/api/sessions/:id/chat/stream",
+            get(crate::chat::chat_stream),
+        )
+        .route("/api/sessions/:id/chat/sync", post(crate::chat::chat_sync))
+        .route("/api/sessions/:id/chat/:msg_id", get(crate::chat::chat_get))
+        .route(
+            "/api/sessions/:id/chat/:msg_id/cancel",
+            post(crate::chat::chat_cancel),
+        )
+        .route("/api/chat/overview", get(crate::chat::chat_overview))
+        .route("/api/server/info", get(crate::chat::server_info))
         .route("/ws/:id", get(crate::ws::ws_session))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -143,6 +172,7 @@ pub fn build_app(state: SharedState) -> Router {
 
     let app = Router::new()
         .route("/", get(crate::assets::login_page))
+        .route("/remote", get(crate::assets::remote_page))
         .route("/static/*path", get(crate::assets::static_file))
         .route("/api/health", get(handlers::health))
         .route("/api/login", post(handlers::login))
@@ -2205,5 +2235,659 @@ mod tests {
                 "ACAO must reflect the Origin on OPTIONS {uri}"
             );
         }
+    }
+
+    // ---- /remote chat client page --------------------------------------------
+
+    /// The page is public (it hosts its own login), base-path substituted,
+    /// and pulls the remote client assets.
+    #[tokio::test]
+    async fn remote_page_served_publicly_with_base_path() {
+        let (app, _dir) = test_app().await;
+        let res = app
+            .clone()
+            .oneshot(Request::get("/remote").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(ct.starts_with("text/html"), "got {ct}");
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("/static/js/remote.js"));
+        assert!(html.contains("/static/css/remote.css"));
+        assert!(!html.contains("__BASE_PATH__"));
+
+        for asset in [
+            "/static/js/remote.js",
+            "/static/css/remote.css",
+            "/static/remote.webmanifest",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(Request::get(asset).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{asset}");
+        }
+
+        let (app, _dir) = test_app_based().await;
+        let res = app
+            .clone()
+            .oneshot(Request::get("/app/remote").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains(r#"window.BASE_PATH = "/app""#));
+        assert!(html.contains("/app/static/js/remote.js"));
+    }
+
+    // ---- Chat API tests (real tmux) ------------------------------------------
+
+    async fn chat_session(app: &axum::Router, token: &str) -> String {
+        let id = create_session(app, token).await;
+        // Let bash print its first prompt so the baseline screen is stable.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        id
+    }
+
+    /// Ask + wait: the reply is the command's output only — no echoed
+    /// question, no trailing prompt — and both turns are persisted.
+    #[tokio::test]
+    async fn chat_round_trip_persists_turns() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let id = chat_session(&app, &token).await;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some(r#"{"text":"echo CHAT_PROOF_$((6*7))","settle_ms":300}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert_eq!(v["question"]["role"], "user");
+        assert_eq!(v["question"]["status"], "done");
+        assert_eq!(v["question"]["content"], "echo CHAT_PROOF_$((6*7))");
+        let reply = &v["reply"];
+        assert_eq!(reply["role"], "assistant");
+        assert_eq!(reply["status"], "done", "reply: {reply}");
+        assert_eq!(reply["request_id"], v["question"]["id"]);
+        let content = reply["content"].as_str().unwrap();
+        assert_eq!(content, "CHAT_PROOF_42", "reply must be the bare output");
+        let reply_id = reply["id"].as_i64().unwrap();
+
+        // History: both turns, ascending, nothing pending.
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        let msgs = v["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["id"].as_i64().unwrap(), reply_id);
+        assert_eq!(v["has_more"], false);
+        assert!(v["pending_reply_id"].is_null());
+
+        // Cursor: nothing after the reply; the question is before it.
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat?after={reply_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            body_json(res).await["messages"].as_array().unwrap().len(),
+            0
+        );
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat?before={reply_id}&limit=1"),
+            None,
+        )
+        .await;
+        let v = body_json(res).await;
+        assert_eq!(v["messages"][0]["role"], "user");
+
+        // Single turn fetch.
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat/{reply_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["content"], "CHAT_PROOF_42");
+
+        // Overview lists the session with its digest; server info is present.
+        let res = authed_request(&app, &token, "GET", "/api/chat/overview", None).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert!(v["server"]["name"]
+            .as_str()
+            .map(|n| !n.is_empty())
+            .unwrap_or(false));
+        let entry = v["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .expect("session in overview");
+        assert_eq!(entry["chat"]["count"], 2);
+        assert_eq!(entry["chat"]["pending"], false);
+        assert_eq!(entry["chat"]["last"]["role"], "assistant");
+        assert_eq!(entry["chat"]["last"]["preview"], "CHAT_PROOF_42");
+
+        let res = authed_request(&app, &token, "GET", "/api/server/info", None).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert!(v["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "chat"));
+        assert_eq!(v["sessions"]["running"], 1);
+
+        // Clear.
+        let res = authed_request(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/api/sessions/{id}/chat"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["deleted"], 2);
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            body_json(res).await["messages"].as_array().unwrap().len(),
+            0
+        );
+
+        delete_session(&app, &token, &id).await;
+    }
+
+    /// wait:false returns 202 immediately with a pending reply; a long-poll
+    /// GET on the reply then resolves to the finished turn.
+    #[tokio::test]
+    async fn chat_async_then_long_poll() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let id = chat_session(&app, &token).await;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some(r#"{"text":"sleep 1; echo ASYNC_OK","wait":false,"settle_ms":300}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let v = body_json(res).await;
+        assert_eq!(v["reply"]["status"], "pending");
+        let reply_id = v["reply"]["id"].as_i64().unwrap();
+
+        // Listing while pending exposes the pending id.
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat"),
+            None,
+        )
+        .await;
+        assert_eq!(body_json(res).await["pending_reply_id"], reply_id);
+
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat/{reply_id}?wait=20"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert_eq!(v["status"], "done", "turn: {v}");
+        assert_eq!(v["content"], "ASYNC_OK");
+
+        delete_session(&app, &token, &id).await;
+    }
+
+    /// One reply at a time per console: a second ask is 409 while the first
+    /// is pending; cancel with interrupt stops the running command and frees
+    /// the console for the next question.
+    #[tokio::test]
+    async fn chat_conflict_and_cancel() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let id = chat_session(&app, &token).await;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some(r#"{"text":"sleep 30; echo NEVER","wait":false}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let reply_id = body_json(res).await["reply"]["id"].as_i64().unwrap();
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some(r#"{"text":"echo second","wait":false}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let v = body_json(res).await;
+        assert_eq!(v["reply_id"], reply_id);
+
+        let res = authed_request(
+            &app,
+            &token,
+            "DELETE",
+            &format!("/api/sessions/{id}/chat"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::CONFLICT,
+            "clear is refused while pending"
+        );
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat/{reply_id}/cancel"),
+            Some(r#"{"interrupt":true}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["status"], "cancelled");
+
+        // Console is free again and the interrupted command never printed.
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some(r#"{"text":"echo AFTER_CANCEL","settle_ms":300}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        assert_eq!(v["reply"]["status"], "done");
+        let content = v["reply"]["content"].as_str().unwrap();
+        assert!(content.contains("AFTER_CANCEL"), "content: {content:?}");
+        assert!(!content.contains("NEVER"), "content: {content:?}");
+
+        delete_session(&app, &token, &id).await;
+    }
+
+    /// The SSE stream opens with a catch-up of stored turns.
+    #[tokio::test]
+    async fn chat_stream_replays_history_first() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let id = chat_session(&app, &token).await;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some(r#"{"text":"echo STREAM_SEED","settle_ms":300}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat/stream"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("text/event-stream"))
+            .unwrap_or(false));
+        let mut body = res.into_body();
+        let mut text = String::new();
+        // Two frames: the user turn and the assistant turn.
+        for _ in 0..2 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+                .await
+                .expect("frame within 5s")
+                .expect("stream open")
+                .expect("frame ok");
+            if let Some(data) = frame.data_ref() {
+                text.push_str(&String::from_utf8_lossy(data));
+            }
+        }
+        assert!(text.contains("event: message"), "sse: {text:?}");
+        assert!(text.contains("\"role\":\"user\""), "sse: {text:?}");
+        assert!(text.contains("STREAM_SEED"), "sse: {text:?}");
+
+        delete_session(&app, &token, &id).await;
+    }
+
+    /// Commands run on the console itself (here via /exec) show up in the
+    /// chat as imported turns; repeated loads/syncs never duplicate them, and
+    /// chat-originated questions are not re-imported either.
+    #[tokio::test]
+    async fn chat_imports_console_scrollback_without_duplicates() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let id = chat_session(&app, &token).await;
+
+        // Drive the console directly, bypassing the chat API.
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/exec"),
+            Some(r#"{"command":"echo IMPORT_ONE"}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat"),
+            None,
+        )
+        .await;
+        let v = body_json(res).await;
+        let msgs = v["messages"].as_array().unwrap();
+        assert!(msgs.len() >= 2, "expected imported turns, got {v}");
+        let user = msgs
+            .iter()
+            .find(|m| {
+                m["role"] == "user" && m["content"].as_str().unwrap().contains("echo IMPORT_ONE")
+            })
+            .expect("imported question");
+        assert_eq!(user["source"], "import");
+        let reply = msgs
+            .iter()
+            .find(|m| m["request_id"] == user["id"])
+            .expect("imported reply");
+        assert!(
+            reply["content"].as_str().unwrap().contains("IMPORT_ONE"),
+            "reply: {reply}"
+        );
+        assert_eq!(reply["source"], "import");
+        let count = msgs.len();
+
+        // Idempotent: another load and an explicit sync add nothing.
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            body_json(res).await["messages"].as_array().unwrap().len(),
+            count
+        );
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat/sync"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["imported"], 0);
+
+        // A chat-originated question is typed into the same console and must
+        // align, not duplicate.
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some(r#"{"text":"echo VIA_CHAT","settle_ms":300}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat/sync"),
+            None,
+        )
+        .await;
+        assert_eq!(body_json(res).await["imported"], 0);
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat"),
+            None,
+        )
+        .await;
+        let v = body_json(res).await;
+        let msgs = v["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), count + 2, "{v}");
+        let via_chat: Vec<_> = msgs
+            .iter()
+            .filter(|m| m["content"] == "echo VIA_CHAT")
+            .collect();
+        assert_eq!(via_chat.len(), 1);
+        assert_eq!(via_chat[0]["source"], "chat");
+
+        // Then more console activity after the chat turn is imported.
+        authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/exec"),
+            Some(r#"{"command":"echo IMPORT_TWO"}"#),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat/sync"),
+            None,
+        )
+        .await;
+        assert_eq!(body_json(res).await["imported"], 1);
+
+        let res = authed_request(&app, &token, "GET", "/api/server/info", None).await;
+        assert!(body_json(res).await["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "chat-sync"));
+
+        delete_session(&app, &token, &id).await;
+    }
+
+    /// Console turns that predate the first chat question are backfilled
+    /// with timestamps before it, so the thread reads in real order.
+    #[tokio::test]
+    async fn chat_backfills_console_turns_older_than_chat() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+        let id = chat_session(&app, &token).await;
+
+        authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/exec"),
+            Some(r#"{"command":"echo OLDER_ONE"}"#),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // Ask via chat before any sync has run (chat_send does not sync).
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some(r#"{"text":"echo NEWER","settle_ms":300}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let newer = body_json(res).await;
+        let newer_ts = newer["question"]["created_at"].as_i64().unwrap();
+
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat"),
+            None,
+        )
+        .await;
+        let v = body_json(res).await;
+        let msgs = v["messages"].as_array().unwrap();
+        let older = msgs
+            .iter()
+            .find(|m| {
+                m["role"] == "user" && m["content"].as_str().unwrap().contains("echo OLDER_ONE")
+            })
+            .expect("backfilled turn: {v}");
+        assert_eq!(older["source"], "import");
+        assert!(
+            older["created_at"].as_i64().unwrap() < newer_ts,
+            "backfill must be stamped before the chat turn"
+        );
+        // Stable on the next sync.
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat/sync"),
+            None,
+        )
+        .await;
+        assert_eq!(body_json(res).await["imported"], 0);
+
+        delete_session(&app, &token, &id).await;
+    }
+
+    #[tokio::test]
+    async fn chat_error_cases() {
+        let (app, _dir) = test_app().await;
+        let token = obtain_token(&app).await;
+
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            "/api/sessions/zzzzzzzz/chat",
+            Some(r#"{"text":"hi"}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = authed_request(&app, &token, "GET", "/api/sessions/zzzzzzzz/chat", None).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            "/api/sessions/zzzzzzzz/chat/stream",
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let id = chat_session(&app, &token).await;
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some(r#"{"text":"   "}"#),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = authed_request(
+            &app,
+            &token,
+            "POST",
+            &format!("/api/sessions/{id}/chat"),
+            Some("not json"),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let res = authed_request(
+            &app,
+            &token,
+            "GET",
+            &format!("/api/sessions/{id}/chat/999999"),
+            None,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // Unauthenticated chat calls are rejected like every other API route.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/sessions/{id}/chat"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        delete_session(&app, &token, &id).await;
     }
 }
