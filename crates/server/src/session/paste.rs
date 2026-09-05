@@ -1,11 +1,13 @@
-//! Image paste delivery (Go parity: internal/session/paste.go).
+//! Image and file paste delivery (Go parity: internal/session/paste.go).
 //!
-//! Primary path: write the image to the server's system clipboard and send
-//! Ctrl+V so a clipboard-aware program (e.g. Claude Code) reads it.
+//! Image primary path: write the image to the server's system clipboard and
+//! send Ctrl+V so a clipboard-aware program (e.g. Claude Code) reads it.
 //!
-//! Fallback (no display / no clipboard tool): save the image to a file under
-//! the store dir and type its absolute path into the terminal, so the program
-//! can read the image from disk.
+//! Image fallback (no display / no clipboard tool), and the only path for a
+//! non-image file: save it under the store dir and type its absolute path
+//! into the terminal, so the program can read it from disk. Arbitrary files
+//! (a PDF, a zip, a copied document) have no equivalent "paste as bitmap"
+//! clipboard convention, so they always take this path.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -80,6 +82,30 @@ impl Session {
             .write(format!("{} ", path.display()).as_bytes())
             .map_err(PasteError::PtyWrite)
     }
+
+    /// Deliver a pasted non-image file to the program running in the PTY.
+    ///
+    /// Always saves under `<store_dir>/<id>/pastes/` (there is no clipboard
+    /// convention for arbitrary files) and types the absolute path.
+    /// `name` is the client-reported filename, if any; only its basename is
+    /// trusted and it is otherwise ignored.
+    pub async fn paste_file(
+        &self,
+        data: &[u8],
+        mime: &str,
+        name: &str,
+        store_dir: &Path,
+    ) -> Result<(), PasteError> {
+        if data.is_empty() {
+            return Err(PasteError::EmptyData);
+        }
+        let path = save_file(data, mime, name, store_dir, &self.id)
+            .await
+            .map_err(PasteError::Save)?;
+        self.pty
+            .write(format!("{} ", path.display()).as_bytes())
+            .map_err(PasteError::PtyWrite)
+    }
 }
 
 /// Push image bytes onto the system clipboard using wl-copy (Wayland) or
@@ -143,6 +169,30 @@ async fn copy_image_to_clipboard(
     }
 }
 
+/// Unix-nanos timestamp used to name a saved paste file.
+fn paste_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+/// Write `data` to `<store_dir>/<id>/pastes/<filename>`, creating the
+/// directory if needed, and return the absolute path.
+async fn write_paste_file(
+    data: &[u8],
+    filename: &str,
+    store_dir: &Path,
+    id: &str,
+) -> std::io::Result<PathBuf> {
+    let dir = store_dir.join(id).join("pastes");
+    tokio::fs::create_dir_all(&dir).await?;
+    let path = dir.join(filename);
+    tokio::fs::write(&path, data).await?;
+    // Go parity (filepath.Abs): on failure, fall back to the path as-is.
+    Ok(std::path::absolute(&path).unwrap_or(path))
+}
+
 /// Save image bytes under `<store_dir>/<id>/pastes/paste-<unix_nanos><ext>`
 /// and return the absolute path.
 async fn save_image_file(
@@ -151,16 +201,31 @@ async fn save_image_file(
     store_dir: &Path,
     id: &str,
 ) -> std::io::Result<PathBuf> {
-    let dir = store_dir.join(id).join("pastes");
-    tokio::fs::create_dir_all(&dir).await?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let path = dir.join(format!("paste-{nanos}{}", ext_for_mime(mime)));
-    tokio::fs::write(&path, data).await?;
-    // Go parity (filepath.Abs): on failure, fall back to the path as-is.
-    Ok(std::path::absolute(&path).unwrap_or(path))
+    let filename = format!("paste-{}{}", paste_nanos(), ext_for_mime(mime));
+    write_paste_file(data, &filename, store_dir, id).await
+}
+
+/// Save file bytes under `<store_dir>/<id>/pastes/`, naming the file after
+/// the client-supplied `name` (basename only — no path traversal from
+/// untrusted client input) when present, or a generated name otherwise.
+/// Returns the absolute path.
+async fn save_file(
+    data: &[u8],
+    mime: &str,
+    name: &str,
+    store_dir: &Path,
+    id: &str,
+) -> std::io::Result<PathBuf> {
+    let nanos = paste_nanos();
+    let base = Path::new(name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty());
+    let filename = match base {
+        Some(n) => format!("paste-{nanos}-{n}"),
+        None => format!("paste-{nanos}{}", ext_for_file_mime(mime)),
+    };
+    write_paste_file(data, &filename, store_dir, id).await
 }
 
 /// True when `name` resolves to an executable regular file on PATH
@@ -185,6 +250,21 @@ fn ext_for_mime(mime: &str) -> &'static str {
         "image/webp" => ".webp",
         "image/bmp" => ".bmp",
         _ => ".png",
+    }
+}
+
+/// Extension for a generic pasted file when the client gave no filename.
+/// Unlike [`ext_for_mime`], an unknown mime gets no extension rather than
+/// defaulting to `.png` — that default only makes sense for image paste.
+fn ext_for_file_mime(mime: &str) -> &'static str {
+    match mime {
+        "application/pdf" => ".pdf",
+        "application/json" => ".json",
+        "application/zip" => ".zip",
+        "text/plain" => ".txt",
+        "text/csv" => ".csv",
+        "text/html" => ".html",
+        _ => "",
     }
 }
 
@@ -297,6 +377,107 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(found, "pane must contain the typed path {needle}");
+
+        mgr.delete(&sess.id).await.expect("delete");
+    }
+
+    #[test]
+    fn ext_for_file_mime_covers_known_and_unknown() {
+        assert_eq!(ext_for_file_mime("application/pdf"), ".pdf");
+        assert_eq!(ext_for_file_mime("text/plain"), ".txt");
+        assert_eq!(ext_for_file_mime("application/octet-stream"), "");
+        assert_eq!(ext_for_file_mime(""), "", "unknown mime → no extension");
+    }
+
+    #[tokio::test]
+    async fn paste_file_empty_data_errors() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path());
+        let sess = mgr.create(None).await.expect("create");
+
+        let err = sess
+            .paste_file(&[], "application/pdf", "doc.pdf", dir.path())
+            .await;
+        assert!(
+            matches!(err, Err(PasteError::EmptyData)),
+            "expected EmptyData, got: {err:?}"
+        );
+        assert!(!dir.path().join(&sess.id).join("pastes").exists());
+
+        mgr.delete(&sess.id).await.expect("delete");
+    }
+
+    /// A client-supplied filename is preserved (basename only) and the
+    /// absolute path is typed into the pane.
+    #[tokio::test]
+    async fn paste_file_saves_with_original_name() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path());
+        let sess = mgr.create(None).await.expect("create");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let payload: &[u8] = b"%PDF-1.4 fake pdf bytes";
+        sess.paste_file(payload, "application/pdf", "report.pdf", dir.path())
+            .await
+            .expect("paste_file must succeed");
+
+        let pastes = dir.path().join(&sess.id).join("pastes");
+        let entries: Vec<_> = std::fs::read_dir(&pastes)
+            .expect("pastes dir must exist")
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1, "exactly one saved paste");
+        let path = entries[0].path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("paste-") && name.ends_with("-report.pdf"),
+            "original filename must be preserved: {name}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), payload, "bytes must match");
+
+        let needle = std::path::absolute(&path).unwrap().display().to_string();
+        let tmux_name = tmux::session_name(&sess.id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(bytes) = tmux::capture_pane(dir.path(), &tmux_name, 50).await {
+                if String::from_utf8_lossy(&bytes).contains(&needle) {
+                    found = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(found, "pane must contain the typed path {needle}");
+
+        mgr.delete(&sess.id).await.expect("delete");
+    }
+
+    /// No filename given (and a path-traversal attempt in `name`, which must
+    /// be reduced to just its basename / ignored): falls back to a generated
+    /// name using the mime extension map, with no directory escape.
+    #[tokio::test]
+    async fn paste_file_ignores_path_traversal_in_name() {
+        let dir = tempdir().unwrap();
+        let mgr = make_manager(dir.path());
+        let sess = mgr.create(None).await.expect("create");
+
+        let payload: &[u8] = b"just some bytes";
+        sess.paste_file(payload, "text/plain", "../../etc/evil.txt", dir.path())
+            .await
+            .expect("paste_file must succeed");
+
+        let pastes = dir.path().join(&sess.id).join("pastes");
+        let entries: Vec<_> = std::fs::read_dir(&pastes)
+            .expect("pastes dir must exist")
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1, "exactly one saved paste, inside pastes/");
+        let name = entries[0].file_name().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("paste-") && name.ends_with("-evil.txt") && !name.contains('/'),
+            "must keep only the basename: {name}"
+        );
 
         mgr.delete(&sess.id).await.expect("delete");
     }

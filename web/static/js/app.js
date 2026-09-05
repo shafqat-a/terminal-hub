@@ -797,9 +797,9 @@ class TerminalManager {
             }
         });
 
-        // Clipboard image paste is intercepted by the document-level handler
-        // registered in the constructor (xterm.js only pastes text/plain, so an
-        // image never reaches the PTY on its own).
+        // Clipboard file paste (image or otherwise) is intercepted by the
+        // document-level handler registered in the constructor (xterm.js only
+        // pastes text/plain, so a file never reaches the PTY on its own).
 
         this.openWebSocket(serverId, sessionId);
     }
@@ -952,21 +952,25 @@ class TerminalManager {
         }
     }
 
-    // Capture-phase paste handler. Image clipboard content is sent to the
-    // server; text paste is left for xterm.js to handle normally.
+    // Capture-phase paste handler. Clipboard file content (an image, or any
+    // other file copied from the OS file manager) is sent to the server;
+    // text paste is left for xterm.js to handle normally.
     handlePaste(e) {
         const items = (e.clipboardData && e.clipboardData.items) || [];
 
         for (const item of items) {
-            if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
-                e.preventDefault();
-                e.stopPropagation();
+            if (item.kind !== 'file') continue;
+            e.preventDefault();
+            e.stopPropagation();
 
-                const blob = item.getAsFile();
-                if (!blob) return;
+            const blob = item.getAsFile();
+            if (!blob) return;
+            if (item.type && item.type.startsWith('image/')) {
                 this.sendImageBlob(blob, item.type);
-                return; // only the first image
+            } else {
+                this.sendFileBlob(blob, item.type, blob.name);
             }
+            return; // only the first file
         }
 
         // No image in the synchronous paste payload. macOS puts a PNG on the
@@ -986,16 +990,24 @@ class TerminalManager {
 
     // sendImageBlob ships clipboard image data to the server as a paste-image frame.
     sendImageBlob(blob, fallbackMime) {
+        this.sendBlobFrame(blob, 'paste-image', { mime: blob.type || fallbackMime || 'image/png' });
+    }
+
+    // sendFileBlob ships a non-image clipboard file to the server as a
+    // paste-file frame; the server saves it to disk and types its path.
+    sendFileBlob(blob, mime, name) {
+        this.sendBlobFrame(blob, 'paste-file', { mime: mime || 'application/octet-stream', name: name || '' });
+    }
+
+    // sendBlobFrame reads `blob` as base64 and ships it to the server as a
+    // `type` frame merged with `fields` (e.g. mime, name).
+    sendBlobFrame(blob, type, fields) {
         const reader = new FileReader();
         reader.onload = () => {
             // reader.result is "data:<mime>;base64,<payload>"
             const base64 = String(reader.result).split(',')[1] || '';
             if (base64 && this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({
-                    type: 'paste-image',
-                    mime: blob.type || fallbackMime || 'image/png',
-                    data: base64,
-                }));
+                this.ws.send(JSON.stringify({ type, data: base64, ...fields }));
             }
         };
         reader.readAsDataURL(blob);

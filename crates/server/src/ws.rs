@@ -2,7 +2,7 @@
 //!
 //! Wire protocol (Go-compatible):
 //! - Server→client: Text frames carrying JSON `{"type":"output","data":"..."}`.
-//! - Client→server: Text JSON `{"type":"input"|"resize"|"paste-image"|"scroll",...}` or Binary (raw PTY bytes).
+//! - Client→server: Text JSON `{"type":"input"|"resize"|"paste-image"|"paste-file"|"scroll",...}` or Binary (raw PTY bytes).
 //! - On attach: capture-pane snapshot with LF→CRLF, sent as first output frame,
 //!   then a re-assert frame for any active DEC private modes (spec §4.3).
 //! - Live output: per-client UTF-8 boundary carry (§4.1) + UAX #15 stream-safe
@@ -226,6 +226,9 @@ struct ClientMsg {
     cols: u16,
     #[serde(default)]
     mime: String,
+    /// "paste-file" client-reported filename (basename only is trusted).
+    #[serde(default)]
+    name: String,
     /// "scroll" direction: "up" or "down".
     #[serde(default)]
     dir: String,
@@ -277,7 +280,7 @@ async fn scroll_tmux(data_dir: &std::path::Path, name: &str, dir: &str, lines: u
 /// Drive the WebSocket connection: snapshot repaint on attach, then fan-out
 /// PTY output to client and write client input/resize back to the PTY.
 ///
-/// `read_only`: when true, input/resize/paste-image text frames AND binary
+/// `read_only`: when true, input/resize/paste-image/paste-file text frames AND binary
 /// frames are silently ignored (loop continues, last_inbound still updated).
 /// All output forwarding, pings, and lifecycle signals are identical to a
 /// normal (read_only=false) connection — share viewers count as viewers.
@@ -393,6 +396,30 @@ pub async fn pump(socket: WebSocket, sess: Arc<Session>, data_dir: PathBuf, read
                                         Err(e) => {
                                             tracing::warn!(
                                                 "session {}: bad paste-image data: {e}",
+                                                sess.id
+                                            );
+                                        }
+                                    }
+                                }
+                                "paste-file" => {
+                                    match base64::Engine::decode(
+                                        &base64::engine::general_purpose::STANDARD,
+                                        &msg.data,
+                                    ) {
+                                        Ok(file) => {
+                                            if let Err(e) = sess
+                                                .paste_file(&file, &msg.mime, &msg.name, &data_dir)
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    "session {}: paste file failed: {e}",
+                                                    sess.id
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "session {}: bad paste-file data: {e}",
                                                 sess.id
                                             );
                                         }
@@ -1852,6 +1879,156 @@ mod tests {
         assert!(
             found,
             "connection must survive a bad-base64 paste-image frame"
+        );
+
+        sink.send(TungsteniteMessage::Close(None)).await.ok();
+        state.manager.delete(&id).await.ok();
+    }
+
+    // ---- file paste ------------------------------------------------------
+
+    /// paste-file frame: file lands under `<data_dir>/<id>/pastes/` named
+    /// after the client-supplied filename, bytes match the decoded payload,
+    /// and the absolute path is typed into the pane. Unlike paste-image this
+    /// path never depends on a display/clipboard tool.
+    #[tokio::test]
+    async fn ws_paste_file_saves_to_disk() {
+        let (addr, state, dir) = spawn_server().await;
+
+        let sess = state.manager.create(None).await.expect("create session");
+        let id = sess.id.clone();
+
+        let expires = crate::util::unix_now() + 3600;
+        state
+            .store
+            .add_auth_session("wspastefiletoken", expires)
+            .unwrap();
+
+        let url = format!("ws://{addr}/ws/{id}?token=wspastefiletoken");
+        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("WS connect");
+        let (mut sink, mut stream) = ws.split();
+
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .ok();
+        let probe =
+            serde_json::json!({"type": "input", "data": "echo FILE_READ''Y\n"}).to_string();
+        sink.send(TungsteniteMessage::Text(probe))
+            .await
+            .expect("send readiness probe");
+        let ready = wait_for_output(&mut stream, "FILE_READY", Duration::from_secs(10)).await;
+        assert!(ready, "shell must echo the readiness probe within 10s");
+
+        let resize = serde_json::json!({"type": "resize", "cols": 200, "rows": 50}).to_string();
+        sink.send(TungsteniteMessage::Text(resize))
+            .await
+            .expect("send resize");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let payload: &[u8] = b"%PDF-1.4 ws-paste-file-payload";
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload);
+        let frame = serde_json::json!({
+            "type": "paste-file",
+            "data": b64,
+            "mime": "application/pdf",
+            "name": "report.pdf",
+        })
+        .to_string();
+        sink.send(TungsteniteMessage::Text(frame))
+            .await
+            .expect("send paste-file");
+
+        let pastes = dir.path().join(&id).join("pastes");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut saved: Option<std::path::PathBuf> = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(entries) = std::fs::read_dir(&pastes) {
+                if let Some(entry) = entries.flatten().next() {
+                    saved = Some(entry.path());
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let path = saved.expect("a file must appear under pastes/ within 10s");
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-report.pdf"),
+            "original filename must be preserved: {path:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            payload,
+            "saved bytes must equal the decoded payload"
+        );
+
+        let needle = std::path::absolute(&path).unwrap().display().to_string();
+        let tmux_name = tmux::session_name(&id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(bytes) = tmux::capture_pane(dir.path(), &tmux_name, 50).await {
+                if String::from_utf8_lossy(&bytes).contains(&needle) {
+                    found = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(found, "pane must contain the typed absolute path {needle}");
+
+        sink.send(TungsteniteMessage::Close(None)).await.ok();
+        state.manager.delete(&id).await.ok();
+    }
+
+    /// Bad base64 in a paste-file frame must NOT disconnect: a later input
+    /// frame still executes.
+    #[tokio::test]
+    async fn ws_paste_file_bad_base64_keeps_connection() {
+        let (addr, state, _dir) = spawn_server().await;
+
+        let sess = state.manager.create(None).await.expect("create session");
+        let id = sess.id.clone();
+
+        let expires = crate::util::unix_now() + 3600;
+        state
+            .store
+            .add_auth_session("wspastefilebadtoken", expires)
+            .unwrap();
+
+        let url = format!("ws://{addr}/ws/{id}?token=wspastefilebadtoken");
+        let (ws, _resp) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("WS connect");
+        let (mut sink, mut stream) = ws.split();
+
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .ok();
+
+        let frame = serde_json::json!({
+            "type": "paste-file",
+            "data": "!!!not-base64!!!",
+            "mime": "application/pdf",
+            "name": "x.pdf",
+        })
+        .to_string();
+        sink.send(TungsteniteMessage::Text(frame))
+            .await
+            .expect("send bad paste-file");
+
+        let input = serde_json::json!({"type": "input", "data": "echo FILE_ALIVE\n"}).to_string();
+        sink.send(TungsteniteMessage::Text(input))
+            .await
+            .expect("send input after bad paste");
+        let found = wait_for_output(&mut stream, "FILE_ALIVE", Duration::from_secs(10)).await;
+        assert!(
+            found,
+            "connection must survive a bad-base64 paste-file frame"
         );
 
         sink.send(TungsteniteMessage::Close(None)).await.ok();
